@@ -21,15 +21,13 @@ import weierstrass   from "../filters/weierstrass.js";
 import cayley        from "../filters/cayley.js";
 import joukowski     from "../filters/joukowski.js";
 import blaschke      from "../filters/blaschke.js";
-import scSquare      from "../filters/sc_square.js";
-import droplets      from "../filters/droplets.js";      
+import scSquare      from "../filters/sc_square.js"; 
 
 
 export const registry = [
   angular,
   blaschke,
   cayley,
-  droplets,
   expFilter,
   fourier,
   hyperbolic,
@@ -58,3 +56,4 @@ export function defaultParamsFor(filter) {
   for (const [k, def] of Object.entries(filter.params || {})) o[k] = def.default;
   return o;
 }
+
