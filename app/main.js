@@ -5,7 +5,6 @@ import { registry, defaultParamsFor } from "./filters.js";
 import { buildParamsPanel } from "./ui.js";
 
 // --- DOM refs ---
-const fileInput     = document.getElementById("fileInput"); // optional (may be injected elsewhere)
 const loadBtn       = document.getElementById("loadBtn");
 const filterSelect  = document.getElementById("filterSelect");
 const paramsPanel   = document.getElementById("paramsPanel");
@@ -29,6 +28,9 @@ const presetNameEl   = document.getElementById("presetName");
 const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
+
+// Photopea export button
+const exportToPPBtn  = document.getElementById("exportToPPBtn");
 
 // --- Boot ---
 await initState();
@@ -59,23 +61,22 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-// Load button → file dialog (create input lazily if missing)
-let imageChooser = fileInput;
-if (!imageChooser) {
-  imageChooser = document.createElement("input");
-  imageChooser.type = "file";
-  imageChooser.accept = "image/*";
-  imageChooser.style.display = "none";
-  document.body.appendChild(imageChooser);
-}
+// Load button → file dialog (lazy input)
+let imageChooser = document.createElement("input");
+imageChooser.type = "file";
+imageChooser.accept = "image/*";
+imageChooser.style.display = "none";
+document.body.appendChild(imageChooser);
+
 loadBtn.addEventListener("click", () => imageChooser.click());
 imageChooser.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   await loadFileToState(file);
+  e.target.value = "";
 });
 
-// Drag & drop on stage (placeholder or canvas area)
+// Drag & drop on stage
 stageEl.addEventListener("dragover", (ev) => { ev.preventDefault(); });
 stageEl.addEventListener("drop", async (ev) => {
   ev.preventDefault();
@@ -145,10 +146,10 @@ defaultsBtn.addEventListener("click", () => {
 
 // ---------------- Presets: Save / Load JSON ----------------
 
-savePresetBtn.addEventListener("click", () => {
+savePresetBtn?.addEventListener("click", () => {
   const filterId = state.filterId;
   const params   = state.params[filterId];
-  const name     = (presetNameEl.value || "").trim();
+  const name     = (presetNameEl?.value || "").trim();
 
   const payload = {
     type: "distort-lab-preset",
@@ -169,9 +170,9 @@ savePresetBtn.addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-loadPresetBtn.addEventListener("click", () => loadPresetFile.click());
+loadPresetBtn?.addEventListener("click", () => loadPresetFile?.click());
 
-loadPresetFile.addEventListener("change", async (e) => {
+loadPresetFile?.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
 
@@ -184,7 +185,6 @@ loadPresetFile.addEventListener("change", async (e) => {
       return;
     }
 
-    // Switch filter if needed
     if (typeof data.filter === "string" && data.filter !== state.filterId) {
       const found = registry.find(f => f.id === data.filter);
       if (found) {
@@ -197,16 +197,12 @@ loadPresetFile.addEventListener("change", async (e) => {
       }
     }
 
-    // Apply params (shallow merge to keep unknown keys ignored)
     const f = state.currentFilter;
     const base = defaultParamsFor(f);
-    const applied = { ...base, ...data.params };
-    state.params[state.filterId] = applied;
+    state.params[state.filterId] = { ...base, ...data.params };
 
-    // Update preset name if present
-    if (typeof data.name === "string") presetNameEl.value = data.name;
+    if (typeof data.name === "string" && presetNameEl) presetNameEl.value = data.name;
 
-    // Rebuild UI with new params
     buildParamsPanel(
       paramsPanel,
       state.currentFilter,
@@ -219,22 +215,19 @@ loadPresetFile.addEventListener("change", async (e) => {
     console.error(err);
     alert("Failed to load preset.");
   } finally {
-    // clear the file input so the same file can be chosen again later
     e.target.value = "";
   }
 });
 
-// ---------------- Common loader ----------------
+// ---------------- Loader (common) ----------------
 
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.onload = async () => {
     state.image = img;
-
-    // Switch from placeholder to canvas
     placeholderEl.style.display = "none";
-    canvasEl.style.display = ""; // unhide
+    canvasEl.style.display = ""; // show canvas
 
     await drawSource();
     fitToView();
@@ -251,4 +244,70 @@ let raf = 0;
 function requestRender() {
   if (raf) cancelAnimationFrame(raf);
   raf = requestAnimationFrame(() => { render(); });
+}
+
+// ====================== Photopea roundtrip integration ======================
+
+// Parse sessionId from URL (?sessionId=...)
+const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
+
+// Export current output PNG to Photopea (via plugin window)
+exportToPPBtn?.addEventListener("click", async () => {
+  try {
+    const ab = await canvasToArrayBuffer(canvasEl);
+    // Prefer posting to the opener (plugin tab). If none - noop.
+    const pluginOrigin = "https://pt-home.github.io";
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({
+        type: "LAB_EXPORT",
+        sessionId,
+        mime: "image/png",
+        name: "distorted.png",
+        buffer: ab
+      }, pluginOrigin, [ab]); // transfer
+    } else {
+      alert("Plugin window is not available. Please use the Photopea plugin panel to start a session.");
+    }
+  } catch (e) {
+    console.error(e);
+    alert("Failed to export PNG to Photopea.");
+  }
+});
+
+// Receive images from plugin (LAB_IMAGE) and session open pings (LAB_OPEN)
+window.addEventListener("message", async (ev) => {
+  const origin = ev.origin;
+  if (origin !== "https://pt-home.github.io") return;
+  const msg = ev.data || {};
+  if (msg.sessionId && sessionId && msg.sessionId !== sessionId) return;
+
+  if (msg.type === "LAB_OPEN") {
+    // Acknowledge (optional)
+    // console.log("Session confirmed:", sessionId);
+    return;
+  }
+  if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
+    // Load PNG buffer as current source image
+    try {
+      const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
+      const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
+      await loadFileToState(file);
+    } catch (e) {
+      console.error("Failed to load image from plugin:", e);
+    }
+  }
+});
+
+// Helper: canvas → ArrayBuffer (PNG)
+function canvasToArrayBuffer(canvas) {
+  return new Promise((resolve, reject) => {
+    if (!canvas) return reject(new Error("No canvas"));
+    canvas.toBlob((blob) => {
+      if (!blob) return reject(new Error("toBlob() failed"));
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsArrayBuffer(blob);
+    }, "image/png");
+  });
 }
