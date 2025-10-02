@@ -26,7 +26,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Distort Lab for Photopea</h1>
+    <h1>2Distort Lab for Photopea</h1>
     <p>Send the active layer to Distort Lab, tweak distortions, then export back as a new Photopea document.</p>
     <button id="sendBtn" class="btn">Send to Lab</button>
     <div class="note" id="status"></div>
@@ -91,9 +91,7 @@
 
     // ---------------- NEW: Clipboard-based layer export ----------------
     function askPhotopeaForActiveLayer(){
-      // Копіюємо АКТИВНИЙ ШАР, створюємо тимчасовий документ із параметрами поточного,
-      // вставляємо, експортуємо PNG у OE, закриваємо тимчасовий документ.
-      // Без дублювання всього документа, без «гілок».
+      
       const script = `
       (function(){
         try{
