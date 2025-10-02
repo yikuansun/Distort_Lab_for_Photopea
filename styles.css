@@ -1,0 +1,110 @@
+:root {
+  --bg:#0f1115; --panel:#151823; --line:#24283b; --text:#e6e6ea; --muted:#9aa0a6; --accent:#58a6ff;
+}
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body {
+  margin:0;
+  background:var(--bg);
+  color:var(--text);
+  font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  /* Remove the outer scrollbar so we don't get double scrollbars with the stage */
+  overflow: hidden;
+}
+
+/* Header: left title + right action button */
+header {
+  padding:12px 16px;
+  border-bottom:1px solid var(--line);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+.head-left { display:flex; flex-direction:column; }
+header h1 { margin:0; font-size:18px; }
+header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+
+header .ghost {
+  background:transparent;
+  color:#e6e6ea;
+  border:1px solid var(--line);
+  border-radius:10px;
+  padding:8px 12px;
+  cursor:pointer;
+}
+header .ghost:hover { border-color:#3a3f55; }
+
+/* Layout takes full viewport height minus header */
+.layout { display:grid; grid-template-columns:320px 1fr; height:calc(100vh - 60px); }
+
+.sidebar { background:var(--panel); border-right:1px solid var(--line); padding:12px; overflow:auto; }
+.block { border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+label { display:block; margin-bottom:6px; color:#c9d1d9; }
+
+.sidebar input[type="range"],
+.sidebar input[type="number"],
+.sidebar input[type="text"],
+.sidebar select { width:100%; }
+
+.sidebar button {
+  width:100%;
+  padding:10px 12px;
+  background:#1f6feb;
+  color:white;
+  border:0;
+  border-radius:12px;
+  cursor:pointer;
+  line-height:1.2;
+}
+.sidebar button + button { margin-top:8px; }
+
+.sidebar button.secondary {
+  background:#2d344a;
+}
+.sidebar button.secondary:hover {
+  background:#374062;
+}
+
+/* Three-equal-button row (Zoom -, 100%, Zoom +) */
+.btn-grid-3 {
+  display:grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap:8px;
+  margin:8px 0;
+}
+.btn-grid-3 button + button { margin-top:0; }
+
+.hint { color:var(--muted); font-size:12px; }
+
+/* Stage: single scroll area for zoomed canvas; white background for contrast */
+.stage {
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:12px;
+  overflow:auto;           /* only this area can scroll */
+  background:#ffffff;      /* white background as requested */
+}
+
+/* Stage placeholder shown before an image is loaded */
+#stagePlaceholder {
+  border:2px dashed #c9ced6;
+  color:#3b3f45;
+  background:#ffffff;
+  border-radius:12px;
+  padding:24px 32px;
+  text-align:center;
+  font-weight:600;
+  user-select:none;
+}
+
+/* Canvas: white background and soft border (shown after image load) */
+#view {
+  background:#ffffff;
+  border:1px solid var(--line);
+  border-radius:12px;
+  max-width:100%;
+  height:auto;
+}
