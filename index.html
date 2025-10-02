@@ -2,24 +2,35 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Distort Lab</title>
+  <title>Distort Lab — Canvas 2D</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="dl.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css" />
-  <link rel="icon" href="/dl.svg" type="image/svg+xml">
-  <link rel="mask-icon" href="/dl.svg" color="#2563eb">
-  <meta name="theme-color" content="#0f1115">
+  <style>
+    /* Minimal style for the Photopea export button (do not rely on styles.css) */
+    .btn-pp {
+      background:#00a592 !important;
+      color:#fff !important;
+      border:0;
+      border-radius:10px;
+      padding:8px 12px;
+      font-weight:600;
+      cursor:pointer;
+    }
+  </style>
 </head>
 <body>
-  <!-- Header matches your CSS: header/head-left/ghost -->
   <header>
     <div class="head-left">
       <h1>Distort Lab</h1>
-      <div class="sub"></div>
+      <div class="sub">Pure JS • ES Modules • GitHub Pages ready</div>
     </div>
-    <button id="commitBtn" class="ghost" title="Bake current output into source (Ctrl+B)">Commit Changes</button>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="exportToPPBtn" class="btn-pp" title="Send current output PNG to Photopea (new document)">Export PNG to Photopea (new document)</button>
+      <button id="commitBtn" class="ghost" title="Bake current output into source (Ctrl+B)">Commit Changes</button>
+    </div>
   </header>
 
-  <!-- Layout grid: sidebar + stage -->
   <div class="layout">
     <aside class="sidebar" id="sidebar">
       <section class="block">
@@ -44,14 +55,12 @@
         <select id="filterSelect"></select>
       </section>
 
-      <section class="block" id="paramsPanel">
-        <!-- dynamic filter params UI is rendered here by ui.js -->
-      </section>
+      <section class="block" id="paramsPanel"></section>
 
       <section class="block">
         <button id="defaultsBtn" class="secondary">Default</button>
 
-        <label class="mt" for="presetName" style="margin-top:8px;">Preset name</label>
+        <label for="presetName" style="margin-top:8px;">Preset name</label>
         <input id="presetName" class="input" type="text" placeholder="My preset" />
         <div class="btn-grid-3" style="grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
           <button id="savePresetBtn">Save JSON</button>
@@ -59,10 +68,8 @@
         </div>
         <input id="loadPresetFile" type="file" accept="application/json" style="display:none" />
       </section>
-	  <small>(c) Oleg Pustovoit, 2025.</small>
     </aside>
 
-    <!-- Stage area: single scroll container with white bg (per your CSS) -->
     <section class="stage" id="stage">
       <div id="stagePlaceholder">
         Drop an image here or use “Load Image…”
