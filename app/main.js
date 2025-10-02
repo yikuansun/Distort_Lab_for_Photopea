@@ -34,6 +34,10 @@ const exportToPPBtn  = document.getElementById("exportToPPBtn");
 const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
+// ---------- Anti-race state ----------
+let lastSeqApplied = -1; // last successfully applied frame seq
+let currentLoadId  = 0;  // monotonically increasing load generation
+
 // ---------- Boot ----------
 await initState();
 await initCanvas();
@@ -202,16 +206,35 @@ window.addEventListener("message", async (ev)=>{
   }
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
-    LL("← LAB_IMAGE", msg.buffer.byteLength, "bytes");
+    const seq = typeof msg.seq === "number" ? msg.seq : -1;
+
+    // Ignore stale frames (seq must strictly increase)
+    if (seq <= lastSeqApplied) {
+      LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
+      return;
+    }
+
+    // Start new load generation
+    const loadId = ++currentLoadId;
+    LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
+
     try{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
-      await loadFileToState(file);
 
-      // Confirm AFTER actual drawSource/fitToView/render sequence
+      // Await decoding & drawing; if a newer load started, abort applying
+      await loadFileToState(file);
+      if (loadId !== currentLoadId) {
+        LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
+        return;
+      }
+
+      // Confirm only for the currently applied newest seq
+      lastSeqApplied = seq;
+
       if (window.opener && !window.opener.closed) {
-        window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId }, "https://pt-home.github.io");
-        LL("→ LAB_IMAGE_APPLIED");
+        window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
+        LL("→ LAB_IMAGE_APPLIED seq="+seq);
       }
     }catch(e){
       console.error("Failed to load image from plugin:", e);
