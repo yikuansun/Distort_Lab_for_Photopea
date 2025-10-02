@@ -14,16 +14,12 @@
       margin:0; background:var(--panel); color:var(--text);
       font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
     }
-    .wrap{
-      padding:12px; width:100%; max-width:520px;
-    }
+    .wrap{ padding:12px; width:100%; max-width:520px; }
     h1{ font-size:16px; margin:0 0 6px; }
     p{ margin:0 0 10px; color:var(--muted); }
     .btn{
-      width:100%;
-      border:0; border-radius:10px; padding:10px 12px;
-      cursor:pointer; font-weight:600;
-      background:var(--accent); color:white;
+      width:100%; border:0; border-radius:10px; padding:10px 12px;
+      cursor:pointer; font-weight:600; background:var(--accent); color:white;
     }
     .note{ margin-top:8px; font-size:12px; color:var(--muted); }
   </style>
@@ -38,20 +34,34 @@
 
   <script>
   (function(){
-    // --- Config ---
+    // ---------------- Config ----------------
     const LAB_URL = "https://pt-home.github.io/Distort_Lab_for_Photopea/";
     const PHOTOPEA_ORIGIN = "https://www.photopea.com";
     const LAB_ORIGIN = "https://pt-home.github.io";
 
-    // --- State ---
+    // Handshake / retry timings
+    const READY_TIMEOUT_MS = 2000;     // wait for LAB_READY
+    const READY_RETRIES    = 2;        // how many times to re-announce LAB_OPEN
+    const APPLIED_TIMEOUT_MS = 2000;   // wait for LAB_IMAGE_APPLIED
+    const APPLIED_RETRIES    = 2;
+
+    // ---------------- State ----------------
     let sessionId = null;
     let labWin = null;
-    let labReady = false;
+    let labIsReady = false;
 
-    const sendBtn = document.getElementById("sendBtn");
+    let pendingPng = null;   // ArrayBuffer held until Lab is ready
+    let pendingName = "from-photopea.png";
+
     const statusEl = document.getElementById("status");
+    const sendBtn  = document.getElementById("sendBtn");
 
-    function log(msg){ statusEl.textContent = msg; }
+    // --------------- Logging helpers ---------------
+    const L = (...a)=>console.log("[DL-PLUGIN]", ...a);
+    const LP= (...a)=>console.log("%c[DL-PP]", "color:#9aa0a6", ...a);
+    const LL= (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
+
+    function setStatus(msg){ statusEl.textContent = msg; }
 
     function ensureSession(){
       if (!sessionId) sessionId = "sess-" + Math.random().toString(36).slice(2);
@@ -63,97 +73,195 @@
       const url = LAB_URL + "?sessionId=" + encodeURIComponent(sessionId);
       if (!labWin || labWin.closed) {
         labWin = window.open(url, "_blank");
-        labReady = false;
-        log("Opening Distort Lab…");
+        labIsReady = false;
+        setStatus("Opening Distort Lab…");
+        L("Opened Lab tab:", url);
       } else {
         labWin.focus();
-        // Re-announce the session to an already open tab
-        labWin.postMessage({ type:"LAB_OPEN", sessionId }, LAB_ORIGIN);
+        sendLAB_OPEN(); // re-announce
+        setStatus("Distort Lab focused.");
       }
     }
 
-    function requestActiveLayerFromPhotopea(){
-      // Script to export ONLY the active layer as PNG via saveToOE('png')
-      // Steps: store visibility, hide all, show active, saveToOE, restore visibility.
+    function sendLAB_OPEN(){
+      if (!labWin || labWin.closed) return;
+      const msg = { type:"LAB_OPEN", sessionId };
+      labWin.postMessage(msg, LAB_ORIGIN);
+      LL("→ LAB_OPEN", msg);
+    }
+
+    function askPhotopeaForActiveLayer(){
+      // Safer pipeline: duplicate active layer/group into a temp document, rasterize/flatten, trim, export PNG, close.
       const script = `
       (function(){
         var d = app.activeDocument;
-        if (!d) { app.echoToOE("no-document"); return; }
-        var L = d.layers;
-        if (!L || L.length === 0){ app.echoToOE("no-layers"); return; }
+        if (!d){ app.echoToOE("no-document"); return; }
+        if (d.layers.length === 0){ app.echoToOE("no-layers"); return; }
 
-        var vis = [];
-        for (var i=0; i<L.length; i++){ vis[i] = L[i].visible; L[i].visible = false; }
-        var a = d.activeLayer;
-        if (a) a.visible = true;
+        // Save reference to current document
+        var srcDoc = d;
 
-        // Export composite view (only active visible) to OE as PNG
-        app.activeDocument.saveToOE("png");
+        // Helper: select active layer
+        var a = srcDoc.activeLayer;
+        if (!a){ app.echoToOE("no-active-layer"); return; }
 
-        // Restore visibility
-        for (var j=0; j<L.length; j++){ L[j].visible = vis[j]; }
+        // Duplicate active layer (or group) to a new doc
+        var tmpDoc = srcDoc.duplicate(); // duplicate whole doc (fast & robust)
+        // In the duplicated doc, hide everything except top-most equivalent of the active layer bounds
+        // Simpler: keep structure but isolate active layer by visibility
+        var L = tmpDoc.layers;
+        var targetIndex = srcDoc.layers.indexOf(a);
+        if (targetIndex < 0) targetIndex = 0;
+
+        for (var i=0;i<L.length;i++){ L[i].visible = (i===targetIndex); }
+
+        // Rasterize if needed (smart object / text / adj)
+        try { tmpDoc.rasterizeAll(); } catch(e){}
+
+        // Merge visible to single layer
+        try { tmpDoc.mergeVisibleLayers(); } catch(e){}
+
+        // Trim empty borders (transparent)
+        try { tmpDoc.trimTransparent(); } catch(e){}
+
+        // Export to OE
+        tmpDoc.saveToOE("png");
+
+        // Close temp doc without saving (Photopea implicitly can handle via app.activeDocument assignments, but be explicit)
+        try { tmpDoc.close(); } catch(e){}
+
         app.echoToOE("exported-active-layer");
       })();
       `;
-      // Send the script string to Photopea parent frame
       window.parent.postMessage(script, PHOTOPEA_ORIGIN);
-      log("Requesting active layer from Photopea…");
+      setStatus("Requesting active layer from Photopea…");
+      L("Requested active layer from Photopea.");
     }
 
-    // --- Click handler: open/focus Lab, request PNG from Photopea ---
-    sendBtn.addEventListener("click", () => {
-      openOrFocusLab();
-      // Let Lab know the session
-      if (labWin && !labWin.closed) {
-        labWin.postMessage({ type:"LAB_OPEN", sessionId }, LAB_ORIGIN);
+    // Wait until Lab sends LAB_READY, with retries
+    function waitForLabReadyThenSend(){
+      let tries = 0;
+      function attempt(){
+        if (labIsReady) {
+          L("Lab is ready. Sending image.");
+          sendImageToLab();
+          return;
+        }
+        if (tries > READY_RETRIES) {
+          setStatus("Distort Lab did not respond. Allow pop-ups and try again.");
+          L("LAB_READY timeout.");
+          return;
+        }
+        tries++;
+        sendLAB_OPEN();
+        setTimeout(()=>{
+          if (labIsReady) {
+            L("Lab became ready during timeout. Sending image.");
+            sendImageToLab();
+          } else {
+            attempt();
+          }
+        }, READY_TIMEOUT_MS);
       }
-      // Ask Photopea to export the active layer as PNG (ArrayBuffer → message to us)
-      requestActiveLayerFromPhotopea();
+      attempt();
+    }
+
+    function sendImageToLab(){
+      if (!labWin || labWin.closed) { setStatus("Lab tab is not available."); return; }
+      if (!pendingPng) { setStatus("No image to send."); return; }
+      const msg = {
+        type: "LAB_IMAGE",
+        sessionId,
+        mime: "image/png",
+        name: pendingName,
+        buffer: pendingPng
+      };
+      // DO NOT transfer ownership yet: we may need to retry.
+      labWin.postMessage(msg, LAB_ORIGIN);
+      LL("→ LAB_IMAGE (no transfer yet)", {size: pendingPng.byteLength, name: pendingName});
+      waitForAppliedThenFocus(); // focus after LAB_IMAGE_APPLIED
+    }
+
+    function waitForAppliedThenFocus(){
+      let tries = 0;
+      function attempt(){
+        if (!pendingPng) { // cleared on APPLIED
+          L("Lab confirmed apply; focusing.");
+          try { labWin && labWin.focus(); } catch(e){}
+          setStatus("Image sent to Distort Lab.");
+          return;
+        }
+        if (tries > APPLIED_RETRIES) {
+          setStatus("Waiting for Distort Lab… (image not confirmed).");
+          L("LAB_IMAGE_APPLIED timeout.");
+          return;
+        }
+        tries++;
+        // Re-send LAB_IMAGE (idempotent) without transfer
+        if (labWin && !labWin.closed) {
+          labWin.postMessage({ type:"LAB_IMAGE", sessionId, mime:"image/png", name: pendingName, buffer: pendingPng }, LAB_ORIGIN);
+          LL("→ LAB_IMAGE (retry)", {try: tries});
+        }
+        setTimeout(attempt, APPLIED_TIMEOUT_MS);
+      }
+      attempt();
+    }
+
+    // ---------------- Events ----------------
+    sendBtn.addEventListener("click", ()=>{
+      ensureSession();
+      openOrFocusLab();
+      sendLAB_OPEN();
+      askPhotopeaForActiveLayer();
     });
 
-    // --- Receive messages from Photopea (parent) and from Lab (child tab) ---
-    window.addEventListener("message", (ev) => {
-      // 1) From Photopea: ArrayBuffer (PNG) or service strings
+    window.addEventListener("message", (ev)=>{
+      // From Photopea
       if (ev.origin === PHOTOPEA_ORIGIN) {
-        if (ev.data === "done") {
-          // Service ping from Photopea after operations
-          return;
-        }
+        if (ev.data === "done") return;
         if (ev.data instanceof ArrayBuffer) {
-          // Forward PNG to Lab tab
-          if (labWin && !labWin.closed) {
-            labWin.postMessage({
-              type: "LAB_IMAGE",
-              sessionId,
-              mime: "image/png",
-              name: "from-photopea.png",
-              buffer: ev.data
-            }, LAB_ORIGIN, [ev.data]); // transfer ownership
-            log("Image sent to Distort Lab.");
-          } else {
-            log("Lab tab is not available.");
-          }
+          pendingPng = ev.data; // keep copy (no transfer yet)
+          LP("Photopea → plugin: ArrayBuffer", pendingPng.byteLength, "bytes");
+          setStatus("Image received from Photopea.");
+          // Now make sure Lab is ready and send
+          waitForLabReadyThenSend();
           return;
         }
-        // Other strings / echoes from Photopea scripts
         if (typeof ev.data === "string") {
-          // Just show status text
-          log("Photopea: " + ev.data);
+          LP("Photopea:", ev.data);
+          setStatus("Photopea: " + ev.data);
           return;
         }
       }
-
-      // 2) From Lab: LAB_EXPORT → forward buffer back to Photopea as new document
+      // From Lab
       if (ev.origin === LAB_ORIGIN) {
         const msg = ev.data || {};
-        if (msg && msg.type === "LAB_EXPORT" && msg.sessionId === sessionId && msg.buffer instanceof ArrayBuffer) {
-          // Send binary back to Photopea parent – it will open as a new document
-          window.parent.postMessage(msg.buffer, PHOTOPEA_ORIGIN, [msg.buffer]);
-          log("Exported back to Photopea as a new document.");
+        if (!msg || msg.sessionId !== sessionId) return;
+
+        if (msg.type === "LAB_READY") {
+          labIsReady = true;
+          LL("← LAB_READY");
+          setStatus("Distort Lab is ready.");
+          // If image already here, push it immediately
+          if (pendingPng) sendImageToLab();
+          return;
         }
-        if (msg && msg.type === "LAB_OPEN" && msg.sessionId === sessionId) {
-          labReady = true;
-          log("Distort Lab is ready.");
+
+        if (msg.type === "LAB_IMAGE_APPLIED") {
+          LL("← LAB_IMAGE_APPLIED");
+          // We can now drop the buffer (no more retries needed)
+          pendingPng = null;
+          setStatus("Image applied in Distort Lab.");
+          try { labWin && labWin.focus(); } catch(e){}
+          return;
+        }
+
+        if (msg.type === "LAB_EXPORT" && msg.buffer instanceof ArrayBuffer) {
+          // Forward PNG to Photopea as new document
+          LL("← LAB_EXPORT", msg.buffer.byteLength, "bytes");
+          window.parent.postMessage(msg.buffer, PHOTOPEA_ORIGIN, [msg.buffer]);
+          setStatus("Exported back to Photopea as a new document.");
+          return;
         }
       }
     });
