@@ -35,11 +35,8 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1;
-let currentLoadId  = 0;
-
-// For unique export names
-let exportSeq = 0;
+let lastSeqApplied = -1; // last successfully applied frame seq
+let currentLoadId  = 0;  // monotonically increasing load generation
 
 // ---------- Boot ----------
 await initState();
@@ -211,11 +208,13 @@ window.addEventListener("message", async (ev)=>{
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
 
+    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
 
+    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
 
@@ -223,12 +222,14 @@ window.addEventListener("message", async (ev)=>{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
 
+      // Await decoding & drawing; if a newer load started, abort applying
       await loadFileToState(file);
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
 
+      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
 
       if (window.opener && !window.opener.closed) {
@@ -245,20 +246,9 @@ window.addEventListener("message", async (ev)=>{
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
-
-    // Build a unique name for Photopea document
-    exportSeq += 1;
-    const uniqueName = `distorted-${sessionId || "nosess"}-${exportSeq}.png`;
-
     if (window.opener && !window.opener.closed) {
-      window.opener.postMessage({
-        type:"LAB_EXPORT",
-        sessionId,
-        mime:"image/png",
-        name: uniqueName,
-        buffer: ab
-      }, "https://pt-home.github.io", [ab]);
-      LP("→ LAB_EXPORT", ab.byteLength, "bytes", "name:", uniqueName);
+      window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
+      LP("→ LAB_EXPORT", ab.byteLength, "bytes");
     } else {
       alert("Plugin window is not available. Please start from the Photopea plugin panel.");
     }
