@@ -26,7 +26,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>2Distort Lab for Photopea</h1>
+    <h1>3Distort Lab for Photopea</h1>
     <p>Send the active layer to Distort Lab, tweak distortions, then export back as a new Photopea document.</p>
     <button id="sendBtn" class="btn">Send to Lab</button>
     <div class="note" id="status"></div>
@@ -40,26 +40,30 @@
     const LAB_ORIGIN = "https://pt-home.github.io";
 
     // Handshake / retry timings
-    const READY_TIMEOUT_MS = 2000;
-    const READY_RETRIES    = 2;
-    const APPLIED_TIMEOUT_MS = 2000;
-    const APPLIED_RETRIES    = 2;
+    const READY_TIMEOUT_MS   = 1800;   // wait for LAB_READY (per attempt)
+    const READY_RETRIES      = 2;      // LAB_OPEN retries
+    const APPLIED_TIMEOUT_MS = 1300;   // wait for LAB_IMAGE_APPLIED before one resend
+    const APPLIED_RETRIES    = 1;      // at most one LAB_IMAGE retry
 
     // ---------------- State ----------------
     let sessionId = null;
     let labWin = null;
     let labIsReady = false;
 
-    let pendingPng = null;   // ArrayBuffer (до READY не передаємо ownership)
+    let pendingPng = null;        // last PNG buffer waiting to be delivered
     let pendingName = "from-photopea.png";
+    let pendingSeq = -1;          // seq number of the last send
+    let seqCounter = 0;           // monotonically increasing sequence id
+    let appliedTimer = null;      // retry timer handle
+    let appliedTries = 0;         // retry counter for APPLIED wait
 
     const statusEl = document.getElementById("status");
     const sendBtn  = document.getElementById("sendBtn");
 
     // --------------- Logging helpers ---------------
-    const L = (...a)=>console.log("[DL-PLUGIN]", ...a);
-    const LP= (...a)=>console.log("%c[DL-PP]", "color:#9aa0a6", ...a);
-    const LL= (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
+    const L  = (...a)=>console.log("[DL-PLUGIN]", ...a);
+    const LP = (...a)=>console.log("%c[DL-PP]", "color:#9aa0a6", ...a);
+    const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
     const setStatus = (m)=> statusEl.textContent = m;
 
     function ensureSession(){
@@ -89,9 +93,8 @@
       LL("→ LAB_OPEN", msg);
     }
 
-    // ---------------- NEW: Clipboard-based layer export ----------------
+    // ---------------- Clipboard-based layer export (Photopea) ----------------
     function askPhotopeaForActiveLayer(){
-      
       const script = `
       (function(){
         try{
@@ -103,14 +106,14 @@
           var ly = src.activeLayer;
           if (!ly){ app.echoToOE("pp:err:no-active-layer"); return; }
 
-          // Copy ONLY the active layer (not merged)
+          // Copy ONLY the active layer
           try { ly.copy(); app.echoToOE("pp:copy:layer"); }
           catch(e){ app.echoToOE("pp:err:copy:"+e); return; }
 
-          // Read current doc params
+          // Source document params
           var w = src.width  || 1024;
           var h = src.height || 1024;
-          var res = src.resolution || 72;
+          var res  = src.resolution || 72;
           var mode = src.mode || "RGB";
           if (typeof mode !== "string") mode = "RGB";
 
@@ -122,17 +125,16 @@
           try { tmp.paste(); app.echoToOE("pp:paste"); }
           catch(e){ app.echoToOE("pp:err:paste:"+e); try{ tmp.close(); }catch(_){} return; }
 
-          // Optional: trim transparent to tighten bounds (можна прибрати, якщо треба рівно розмір джерела)
+          // Optional: trim transparent to tighten bounds
           try { tmp.trimTransparent(); app.echoToOE("pp:trim"); } catch(e){}
 
           // Export to OE as PNG
           try { tmp.saveToOE("png"); app.echoToOE("pp:saveToOE"); }
           catch(e){ app.echoToOE("pp:err:saveToOE:"+e); }
 
-          // Close temp doc (no save)
+          // Close temp doc
           try { tmp.close(); app.echoToOE("pp:close"); } catch(e){ app.echoToOE("pp:err:close:"+e); }
 
-          // Restore active doc focus (just in case)
           try { app.activeDocument = src; } catch(e){}
 
           app.echoToOE("pp:done");
@@ -146,7 +148,42 @@
       L("Requested active layer from Photopea (copy→new→paste→OE).");
     }
 
-    // ---------------- Waiters ----------------
+    // ---------------- Send / Await APPLIED with seq ----------------
+    function sendImageToLab(){
+      if (!labWin || labWin.closed) { setStatus("Lab tab is not available."); return; }
+      if (!pendingPng) { setStatus("No image to send."); return; }
+
+      pendingSeq = ++seqCounter;
+      appliedTries = 0;
+      if (appliedTimer) { clearTimeout(appliedTimer); appliedTimer = null; }
+
+      const msg = { type:"LAB_IMAGE", sessionId, seq: pendingSeq, mime:"image/png", name: pendingName, buffer: pendingPng };
+      // no transferables → we can retry if APPLIED does not arrive
+      labWin.postMessage(msg, LAB_ORIGIN);
+      LL("→ LAB_IMAGE (seq="+pendingSeq+", no transfer)", {size: pendingPng.byteLength, name: pendingName});
+
+      waitForAppliedThenFocus();
+    }
+
+    function waitForAppliedThenFocus(){
+      if (appliedTimer) clearTimeout(appliedTimer);
+      appliedTimer = setTimeout(()=>{
+        if (appliedTries >= APPLIED_RETRIES) {
+          setStatus("Waiting for Distort Lab… (image not confirmed).");
+          L("LAB_IMAGE_APPLIED timeout for seq", pendingSeq);
+          return;
+        }
+        appliedTries++;
+        // Re-send same seq + same buffer
+        if (labWin && !labWin.closed && pendingPng && pendingSeq >= 0) {
+          labWin.postMessage({ type:"LAB_IMAGE", sessionId, seq: pendingSeq, mime:"image/png", name: pendingName, buffer: pendingPng }, LAB_ORIGIN);
+          LL("→ LAB_IMAGE (retry, seq="+pendingSeq+")");
+          waitForAppliedThenFocus(); // set next wait
+        }
+      }, APPLIED_TIMEOUT_MS);
+    }
+
+    // ---------------- Handshake: wait until Lab is READY, then send ----------------
     function waitForLabReadyThenSend(){
       let tries = 0;
       (function attempt(){
@@ -155,30 +192,6 @@
         tries++;
         sendLAB_OPEN();
         setTimeout(()=> labIsReady ? sendImageToLab() : attempt(), READY_TIMEOUT_MS);
-      })();
-    }
-
-    function sendImageToLab(){
-      if (!labWin || labWin.closed) { setStatus("Lab tab is not available."); return; }
-      if (!pendingPng) { setStatus("No image to send."); return; }
-      const msg = { type:"LAB_IMAGE", sessionId, mime:"image/png", name: pendingName, buffer: pendingPng };
-      // без transferables → зможемо ретраїти до APPLIED
-      labWin.postMessage(msg, LAB_ORIGIN);
-      LL("→ LAB_IMAGE (no transfer yet)", {size: pendingPng.byteLength, name: pendingName});
-      waitForAppliedThenFocus();
-    }
-
-    function waitForAppliedThenFocus(){
-      let tries = 0;
-      (function attempt(){
-        if (!pendingPng) { L("Lab confirmed apply; focusing."); try{ labWin && labWin.focus(); }catch(e){} setStatus("Image sent to Distort Lab."); return; }
-        if (tries > APPLIED_RETRIES) { setStatus("Waiting for Distort Lab… (image not confirmed)."); L("LAB_IMAGE_APPLIED timeout."); return; }
-        tries++;
-        if (labWin && !labWin.closed) {
-          labWin.postMessage({ type:"LAB_IMAGE", sessionId, mime:"image/png", name: pendingName, buffer: pendingPng }, LAB_ORIGIN);
-          LL("→ LAB_IMAGE (retry)", {try: tries});
-        }
-        setTimeout(attempt, APPLIED_TIMEOUT_MS);
       })();
     }
 
@@ -223,10 +236,17 @@
         }
 
         if (msg.type === "LAB_IMAGE_APPLIED") {
-          LL("← LAB_IMAGE_APPLIED");
-          pendingPng = null; // більше не потрібно ретраїти
-          setStatus("Image applied in Distort Lab.");
-          try { labWin && labWin.focus(); } catch(e){}
+          // Accept only if it's for the currently pending seq
+          if (typeof msg.seq === "number" && msg.seq === pendingSeq) {
+            LL("← LAB_IMAGE_APPLIED seq="+msg.seq);
+            // clear pending and cancel retry
+            pendingPng = null;
+            if (appliedTimer) { clearTimeout(appliedTimer); appliedTimer = null; }
+            setStatus("Image applied in Distort Lab.");
+            try { labWin && labWin.focus(); } catch(e){}
+          } else {
+            LL("← LAB_IMAGE_APPLIED (stale) seq="+msg.seq+" while pendingSeq="+pendingSeq);
+          }
           return;
         }
 
