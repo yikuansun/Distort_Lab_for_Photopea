@@ -1,99 +1,126 @@
+// canvas.js
+// Canvas setup, view helpers, PNG export, and reliable "commit to source".
+
 import { state } from "./state.js";
 
-/**
- * Visible canvas used for the final, distorted image.
- */
-const canvas = document.getElementById("view");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+// Keep references to the main canvas and its 2D context.
+let canvas, ctx;
+
+// Guard to prevent overlapping commits (but allows subsequent commits).
+let committing = false;
 
 /**
- * Offscreen source buffer where the original image is kept 1:1.
- * All filters sample from this buffer.
+ * Initialize canvas and 2D context.
  */
-const srcCanvas = document.createElement("canvas");
-const srcCtx = srcCanvas.getContext("2d", { willReadFrequently: true });
-
 export async function initCanvas() {
-  // No-op for now.
+  canvas = document.getElementById("view");
+  if (!canvas) throw new Error("#view canvas not found");
+  ctx = canvas.getContext("2d", { willReadFrequently: true });
+  // Initialize view scale if not present
+  if (typeof state.viewScale !== "number") state.viewScale = 1;
 }
 
 /**
- * Provide canvas references to other modules.
- */
-export function getCanvasRefs() {
-  return { canvas, ctx, srcCanvas, srcCtx };
-}
-
-/**
- * Draw the currently loaded image 1:1 into the offscreen source buffer.
- * Does NOT change the view scale; call fitToView() separately when needed.
+ * Draws the current source image into an internal buffer if needed
+ * and ensures the visible canvas has correct dimensions for rendering.
+ * The actual filter rendering is handled by engine.js -> render().
  */
 export async function drawSource() {
   const img = state.image;
   if (!img) return;
 
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
-  srcCanvas.width = w;
-  srcCanvas.height = h;
-  srcCtx.clearRect(0, 0, w, h);
-  srcCtx.drawImage(img, 0, 0);
+  // Ensure canvas has some sensible size (engine.js will draw using viewScale).
+  // We keep canvas' "logical" size equal to the source size; engine handles scaling.
+  const w = img.naturalWidth || img.width || 0;
+  const h = img.naturalHeight || img.height || 0;
+  if (!w || !h) return;
+
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+
+  // Clear any previous content; actual filter pass will overwrite anyway.
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 }
 
 /**
- * Compute a 'fit-to-view' scale for the visible canvas and store it.
- * Render will use this scale to size the output canvas.
+ * Adjust view scale to fit the image into the stage (white area).
+ * This modifies state.viewScale; engine.js uses it on render().
  */
 export function fitToView() {
-  const w = state.srcCanvas.width;
-  const h = state.srcCanvas.height;
-  if (!w || !h) return;
+  const stage = document.getElementById("stage");
+  if (!stage || !state.image) return;
 
-  const stageEl = document.getElementById("stage");
-  const rect = stageEl.getBoundingClientRect();
+  const bounds = stage.getBoundingClientRect();
+  const pad = 24; // stage padding
+  const availW = Math.max(50, bounds.width - pad * 2);
+  const availH = Math.max(50, bounds.height - pad * 2);
 
-  const PAD = 24;
-  const availW = Math.max(1, rect.width  - PAD);
-  const availH = Math.max(1, rect.height - PAD);
+  const imgW = state.image.naturalWidth || state.image.width || 1;
+  const imgH = state.image.naturalHeight || state.image.height || 1;
 
-  const scaleX = availW / w;
-  const scaleY = availH / h;
-  const scale = Math.max(0.01, Math.min(scaleX, scaleY));
-
+  const scale = Math.max(0.05, Math.min(8, Math.min(availW / imgW, availH / imgH)));
   state.viewScale = scale;
 }
 
 /**
- * Export the visible canvas as a PNG.
+ * Export visible canvas as PNG (what you see is what you get).
  */
-export function exportPNG() {
-  const url = canvas.toDataURL("image/png");
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "distort.png";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL?.(url);
+export function exportPNG(filename = "distort.png") {
+  if (!canvas || !canvas.width || !canvas.height) return;
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement("a"), { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, "image/png");
 }
 
 /**
- * Commit current visible result as the new source.
- * Copies the displayed canvas pixels into srcCanvas at 1:1 and
- * makes subsequent filters operate on this committed version.
+ * Commit the current visible output back into the source image.
+ * This makes the current canvas pixels become the new state.image.
+ * Reliable across multiple sequential commits.
  */
-export function commitToSource() {
-  // Use current output size
-  const outW = canvas.width;
-  const outH = canvas.height;
-  if (!outW || !outH) return;
+export async function commitToSource() {
+  if (!canvas || !state.image) return;
+  if (committing) return; // ignore rapid double-clicks; next click will work
+  committing = true;
 
-  // Resize source buffer to match current output and copy pixels
-  srcCanvas.width = outW;
-  srcCanvas.height = outH;
-  srcCtx.clearRect(0, 0, outW, outH);
-  srcCtx.drawImage(canvas, 0, 0);
+  try {
+    // 1) Read current canvas -> Blob
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob() failed"))), "image/png");
+    });
 
-  // Clear original image handle (we now rely on srcCanvas)
-  state.image = null;
+    // 2) Create an object URL and Image
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = (e) => reject(new Error("Committed image failed to load"));
+      img.src = url;
+    });
+
+    // 3) Swap in as the new source & bump revision to kill any caches
+    state.image = img;
+    state.sourceVersion = (state.sourceVersion || 0) + 1;
+
+    // 4) Resize the canvas to match new source and clear (engine will re-render)
+    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 5) Cleanup URL
+    URL.revokeObjectURL(url);
+  } finally {
+    committing = false;
+  }
 }
