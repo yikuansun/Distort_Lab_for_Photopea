@@ -1,10 +1,10 @@
 import { initState, setFilterId, setParam, state } from "./state.js";
-import { initCanvas, drawSource, fitToView, commitToSource } from "./canvas.js";
+import { initCanvas, drawSource, fitToView } from "./canvas.js";
 import { render } from "./engine.js";
 import { registry, defaultParamsFor } from "./filters.js";
 import { buildParamsPanel } from "./ui.js";
 
-/* ---------- DOM ---------- */
+/* ===== DOM ===== */
 const loadBtn       = document.getElementById("loadBtn");
 const filterSelect  = document.getElementById("filterSelect");
 const paramsPanel   = document.getElementById("paramsPanel");
@@ -30,19 +30,15 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-/* ---------- Logging ---------- */
+/* ===== Logs ===== */
 const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
-/* ---------- RAF helpers ---------- */
+/* ===== RAF helpers ===== */
 let rafHandle = 0;
 function requestRender(){ 
   if (rafHandle) cancelAnimationFrame(rafHandle);
   rafHandle = requestAnimationFrame(()=>render());
-}
-function cancelAllRafs(){
-  if (rafHandle) cancelAnimationFrame(rafHandle);
-  rafHandle = 0;
 }
 function nextRafPaint(){
   return new Promise(res=>{
@@ -53,19 +49,20 @@ function nextRafPaint(){
   });
 }
 
-/* ---------- Blit helper: гарантований перший кадр ---------- */
+/* ===== Blit helper: copy sourceCanvas → visible canvas (first frame) ===== */
 function blitFromSource(){
   if (!state.sourceCanvas) return;
-  const src = state.sourceCanvas;
+  const src  = state.sourceCanvas;
   const view = canvasEl;
   view.width  = src.width;
   view.height = src.height;
   const vctx = view.getContext("2d", { willReadFrequently: true });
+  vctx.setTransform(1,0,0,1,0,0);
   vctx.clearRect(0,0,view.width,view.height);
   vctx.drawImage(src, 0, 0);
 }
 
-/* ---------- Boot ---------- */
+/* ===== Boot ===== */
 await initState();
 await initCanvas();
 
@@ -89,7 +86,7 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-/* ---------- Local open / dnd / paste ---------- */
+/* ===== Local open / dnd / paste ===== */
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -123,9 +120,10 @@ async function loadFileToState(file){
   img.onload = async ()=>{
     state.image = img;
 
-    // Build pipeline source
+    // Build internal source
     await drawSource(true);
-    // First visible paint
+
+    // First visible paint immediately
     blitFromSource();
 
     // Show canvas
@@ -141,7 +139,7 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-/* ---------- Filters ---------- */
+/* ===== Filters ===== */
 filterSelect.addEventListener("change", () => {
   const id = filterSelect.value;
   state.currentFilter = registry.find(f => f.id === id);
@@ -162,8 +160,8 @@ zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
 
 commitBtn?.addEventListener("click", () => {
-  if (!canvasEl || canvasEl.style.display === "none") return;
-  commitToSource(); fitToView(); requestRender();
+  // Commit handled inside engine/canvas; here we just re-render
+  requestRender();
 });
 
 defaultsBtn?.addEventListener("click", () => {
@@ -176,7 +174,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-/* ---------- Presets ---------- */
+/* ===== Presets ===== */
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -204,8 +202,7 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-/* ================== Photopea roundtrip ================== */
-
+/* ===== Photopea integration ===== */
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
 function announceReady(){
@@ -256,19 +253,15 @@ window.addEventListener("message", async (ev)=>{
     LL(`← LAB_IMAGE seq=${seq}, bytes=${msg.buffer.byteLength}, loadId=${loadId}, crc=${crcHere}` + (msg.crc ? ` (plugin=${msg.crc})` : ""));
 
     try {
-      // 1) full reset
-      cancelAllRafs();
-      const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-      if (ctx) ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      // 1) Reset visible canvas & placeholders
+      const vctx = canvasEl.getContext("2d", { willReadFrequently: true });
+      vctx.setTransform(1,0,0,1,0,0);
+      vctx.clearRect(0,0,canvasEl.width,canvasEl.height);
       canvasEl.width = 0; canvasEl.height = 0;
       placeholderEl.style.display = "";
       canvasEl.style.display = "none";
-      state.image = null;
-      state.sourceCommitted = null;
-      state.sourceCanvas = null;
-      state.sourceCtx = null;
 
-      // 2) decode → sourceCanvas (без <img>.onload)
+      // 2) Decode via createImageBitmap → build sourceCanvas
       const blob   = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const bitmap = await createImageBitmap(blob);
 
@@ -281,24 +274,23 @@ window.addEventListener("message", async (ev)=>{
       state.sourceCtx.drawImage(bitmap, 0, 0);
       state.sourceVersion = (state.sourceVersion || 0) + 1;
 
-      // Для експорту «оригінальний розмір» зручно мати image-обʼєкт
+      // optional image snapshot for clipboard export
       state.image = new Image();
       state.image.src = state.sourceCanvas.toDataURL("image/png");
 
       LL(`built source ${bitmap.width}x${bitmap.height} sourceVersion=${state.sourceVersion}`);
 
-      // 3) перший кадр у видиму канву — ГАРАНТОВАНО
+      // 3) Immediate first paint (blit), then show canvas
       blitFromSource();
-
-      // 4) показуємо сцену і робимо звичний цикл
       placeholderEl.style.display = "none";
       canvasEl.style.display = "";
 
+      // 4) Fit & schedule normal renderer
       fitToView();
       await nextRafPaint();
       requestRender();
 
-      // 5) ACK тільки зараз
+      // 5) ACK after a real frame
       lastSeqApplied = seq;
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
@@ -310,7 +302,7 @@ window.addEventListener("message", async (ev)=>{
   }
 });
 
-/* ---------- Export to Photopea (new document) ---------- */
+/* ===== Export to Photopea ===== */
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
@@ -327,7 +319,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }
 });
 
-/* ---------- Copy to Clipboard (original size) ---------- */
+/* ===== Copy to clipboard (original size) ===== */
 copyBtn?.addEventListener("click", async ()=>{
   if (!canvasEl || !state.image) return;
   try{
@@ -352,7 +344,7 @@ copyBtn?.addEventListener("click", async ()=>{
   }
 });
 
-/* ---------- Helpers ---------- */
+/* ===== Helpers ===== */
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
@@ -379,14 +371,23 @@ async function exportOriginalBlobFromVisibleCanvas(){
   if (!image) throw new Error("No image loaded");
   const naturalW = image.naturalWidth || image.width;
   const naturalH = image.naturalHeight || image.height;
-  const prevW = canvasEl.width, prevH = canvasEl.height, prevScale = state.viewScale;
 
-  canvasEl.width = naturalW; canvasEl.height = naturalH; state.viewScale = 1;
-  await nextRafPaint();
+  // Temporarily render at 1:1 to capture original size
+  const prevW = canvasEl.width, prevH = canvasEl.height;
+  const vctx = canvasEl.getContext("2d", { willReadFrequently: true });
+  canvasEl.width  = naturalW;
+  canvasEl.height = naturalH;
+  vctx.setTransform(1,0,0,1,0,0);
+  vctx.clearRect(0,0,naturalW,naturalH);
+  if (state.sourceCanvas) vctx.drawImage(state.sourceCanvas, 0, 0);
+
   const blob = await canvasToBlob(canvasEl);
 
-  canvasEl.width = prevW; canvasEl.height = prevH; state.viewScale = prevScale;
-  await nextRafPaint();
+  // Restore previous view
+  canvasEl.width = prevW; canvasEl.height = prevH;
+  blitFromSource(); // restore pixels
+  requestRender();
+
   return blob;
 }
 async function exportOriginalArrayBufferFromVisibleCanvas(){
