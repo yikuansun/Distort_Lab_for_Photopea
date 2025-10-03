@@ -1,29 +1,31 @@
 // engine.js
 // Read from OFFSCREEN srcCanvas → write to visible #view with zoom.
-// Safe fallback: if srcCanvas empty but state.image є — малюємо напряму і гідруємо srcCanvas.
+// Safe fallback: if srcCanvas empty but state.image exists — draw directly and hydrate srcCanvas.
 
 import { state } from "./state.js";
 import { getSampler, bilinearSample, edgeResolve } from "./utils.js";
 import { drawSource } from "./canvas.js";
-import { getFilterById } from "./filters.js";
 
 let srcData = null;
 let srcW = 0, srcH = 0;
 let lastSourceVersion = -1;
 
+/**
+ * Main render: consumes state.srcCanvas (1:1 source) and produces visible output in state.canvas.
+ * Zoom is applied by resampling into a different-sized destination canvas.
+ */
 export function render() {
   const { canvas, ctx, srcCanvas, srcCtx, currentFilter, params, viewScale } = state;
 
-  // Fallback: якщо нема джерела, але є state.image — згенерувати його.
+  // Fallback: if no source buffer yet but we do have an Image, populate srcCanvas now.
   if ((!srcCanvas || srcCanvas.width === 0 || srcCanvas.height === 0) && state.image) {
-    // Спроба гідрувати srcCanvas (синхронний виклик — image вже декодований)
     try { drawSource(); } catch (_) {}
   }
 
   const hasSrc = srcCanvas && srcCanvas.width > 0 && srcCanvas.height > 0;
   const img = state.image;
 
-  // Якщо досі нема srcCanvas, але є image — хоч щось покажемо
+  // If still no srcCanvas but we have an image, at least show it (and keep UI responsive).
   if (!hasSrc && img && canvas && ctx) {
     const w = img.naturalWidth || img.width || 0;
     const h = img.naturalHeight || img.height || 0;
@@ -34,16 +36,16 @@ export function render() {
       if (canvas.width !== outW || canvas.height !== outH) {
         canvas.width = outW; canvas.height = outH;
       }
-      ctx.setTransform(scale,0,0,scale,0,0);
-      ctx.clearRect(0,0,w,h);
+      ctx.setTransform(scale, 0, 0, scale, 0, 0);
+      ctx.clearRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0);
     }
     return;
   }
 
-  if (!currentFilter || !hasSrc) return;
+  if (!hasSrc) return;
 
-  // Оновити кеш пікселів при зміні розміру або sourceVersion
+  // Refresh cached source pixels when size or sourceVersion changes
   if (!srcData
       || srcW !== srcCanvas.width
       || srcH !== srcCanvas.height
@@ -54,7 +56,7 @@ export function render() {
     srcData = srcCtx.getImageData(0, 0, srcW, srcH);
   }
 
-  // Вихідний холст — з урахуванням масштабу
+  // Destination canvas size = source size * zoom
   const scale = Math.max(0.01, viewScale || 1);
   const outW = Math.max(1, Math.round(srcW * scale));
   const outH = Math.max(1, Math.round(srcH * scale));
@@ -66,21 +68,12 @@ export function render() {
   const dstBuf = dst.data;
   const srcBuf = srcData.data;
 
-  const filt = getFilterById(state.filterId);
-  const p = params[state.filterId] || {};
+  // Current filter and parameters (provided by main/ui)
+  const filt = state.currentFilter;              // <— no getFilterById
+  const p    = params[state.filterId] || {};
 
-  // Геометричні параметри у координатах джерела
-  const center = {
-    cx: (p.centerX !== undefined ? (p.centerX / 100) * srcW : srcW * 0.5),
-    cy: (p.centerY !== undefined ? (p.centerY / 100) * srcH : srcH * 0.5),
-  };
-  const radiusPx = (p.radius !== undefined ? (p.radius / 100) * Math.min(srcW, srcH) * 0.5 : Math.min(srcW, srcH));
-  const edgeMode = p.edgeMode || "clamp";
-  const sampler = getSampler(edgeMode, srcW, srcH, srcBuf);
-
-  // Якщо фільтр не знайдено — просто ресемпл із масштабом
+  // If no filter mapping function, do a straight resample (preview still works)
   if (!filt || typeof filt.map !== "function") {
-    // просте nearest/bilinear копіювання
     let k = 0;
     for (let y = 0; y < outH; y++) {
       const ys = y / scale;
@@ -99,7 +92,19 @@ export function render() {
     return;
   }
 
-  // Основний цикл з геометричним мапінгом
+  // Geometry parameters in source pixel space
+  const center = {
+    cx: (p.centerX !== undefined ? (p.centerX / 100) * srcW : srcW * 0.5),
+    cy: (p.centerY !== undefined ? (p.centerY / 100) * srcH : srcH * 0.5),
+  };
+  const radiusPx = (p.radius !== undefined
+    ? (p.radius / 100) * Math.min(srcW, srcH) * 0.5
+    : Math.min(srcW, srcH));
+
+  const edgeMode = p.edgeMode || "clamp";
+  const sampler  = getSampler(edgeMode, srcW, srcH, srcBuf);
+
+  // Main mapping loop
   let i = 0;
   for (let y = 0; y < outH; y++) {
     const yS = y / scale;
@@ -110,12 +115,16 @@ export function render() {
       const { ux, vy, out } = edgeResolve(u, v, srcW, srcH, edgeMode);
 
       if (out) {
-        dstBuf[i+0]=0; dstBuf[i+1]=0; dstBuf[i+2]=0; dstBuf[i+3]=0;
+        dstBuf[i+0] = 0; dstBuf[i+1] = 0; dstBuf[i+2] = 0; dstBuf[i+3] = 0;
       } else {
         const rgba = bilinearSample(sampler, ux, vy);
-        dstBuf[i+0]=rgba[0]; dstBuf[i+1]=rgba[1]; dstBuf[i+2]=rgba[2]; dstBuf[i+3]=(aOverride!==undefined)?aOverride:rgba[3];
+        dstBuf[i+0] = rgba[0];
+        dstBuf[i+1] = rgba[1];
+        dstBuf[i+2] = rgba[2];
+        dstBuf[i+3] = (aOverride !== undefined) ? aOverride : rgba[3];
       }
     }
   }
-  state.ctx.putImageData(dst, 0, 0);
+
+  ctx.putImageData(dst, 0, 0);
 }
