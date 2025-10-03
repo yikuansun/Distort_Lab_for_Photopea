@@ -42,8 +42,15 @@ let lastSeqApplied = -1; // last confirmed seq that was actually rendered
 let currentLoadId  = 0;  // monotonic load generation id
 
 // ---------- Boot ----------
-await initState();
+// IMPORTANT: initCanvas FIRST so that getCanvasRefs() (used in initState) returns valid srcCanvas/srcCtx
 await initCanvas();
+await initState();
+
+// Sanity log (one-time): ensure we have offscreen buffers published
+console.log("[DL-LAB] boot refs", {
+  view: !!state.canvas, viewCtx: !!state.ctx,
+  src: !!state.srcCanvas, srcCtx: !!state.srcCtx
+});
 
 // Init params
 state.params = {};
@@ -130,13 +137,12 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
   btn.textContent = "Copying…";
   try {
     state.viewScale = 1;
-    await nextPaint(); // schedule & wait a paint at 100%
+    await nextPaint();
     const blob = await canvasToBlob(canvasEl, "image/png");
     await writeImageToClipboard(blob);
     btn.textContent = "Copied!";
   } catch (err) {
     console.error(err);
-    // Fallback: download PNG if clipboard is unavailable
     try {
       const blob = await canvasToBlob(canvasEl, "image/png");
       const url = URL.createObjectURL(blob);
@@ -177,7 +183,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// ---------- Common loader (NOW truly awaiting onload + paint) ----------
+// ---------- Common loader (await onload + paint) ----------
 async function loadFileToState(file){
   return new Promise((resolve, reject)=>{
     try{
@@ -187,15 +193,13 @@ async function loadFileToState(file){
       img.onload = async ()=>{
         try{
           state.image = img;
-
-          // Show canvas, hide placeholder
           if (placeholderEl) placeholderEl.style.display = "none";
           if (canvasEl) canvasEl.style.display = "";
 
-          await drawSource();    // sets canvas size to source size and clears
-          fitToView();           // compute viewScale for stage
-          requestRender();       // schedule render with new source
-          await nextPaint();     // wait one paint to ensure pixels show
+          await drawSource(); // fills srcCanvas/srcCtx with the image
+          fitToView();
+          requestRender();
+          await nextPaint();
 
           URL.revokeObjectURL(url);
           resolve();
@@ -279,13 +283,11 @@ window.addEventListener("message", async (ev)=>{
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
 
-    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
 
-    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
 
@@ -293,19 +295,15 @@ window.addEventListener("message", async (ev)=>{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
 
-      // Await full decode + draw + first paint
       await loadFileToState(file);
 
-      // If a newer load started while we were decoding, abort confirming
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
 
-      // Mark this seq as applied only AFTER we actually painted a frame
       lastSeqApplied = seq;
 
-      // Now confirm to plugin
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
@@ -329,7 +327,6 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
-// Helper: canvas → ArrayBuffer (for Photopea export)
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
