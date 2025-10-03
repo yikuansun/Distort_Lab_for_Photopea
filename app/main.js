@@ -18,6 +18,9 @@ const zoomOutBtn    = document.getElementById("zoomOutBtn");
 const zoomInBtn     = document.getElementById("zoomInBtn");
 const zoom100Btn    = document.getElementById("zoom100Btn");
 
+// New button (copy current canvas at 100% to clipboard)
+const copyClipboard100Btn = document.getElementById("copyClipboard100Btn");
+
 const commitBtn     = document.getElementById("commitBtn");
 const defaultsBtn   = document.getElementById("defaultsBtn");
 
@@ -57,7 +60,7 @@ state.currentFilter = registry[0];
 setFilterId(state.currentFilter.id);
 filterSelect.value = state.filterId;
 
-// Build UI
+// Build UI for current filter
 buildParamsPanel(
   paramsPanel,
   state.currentFilter,
@@ -114,6 +117,48 @@ zoom100Btn?.addEventListener("click", () => setScale(1));
 zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
+
+// New: copy visible canvas to clipboard at enforced 100%
+copyClipboard100Btn?.addEventListener("click", async ()=>{
+  if (!canvasEl || canvasEl.style.display === "none" || !state.image) {
+    alert("Load an image first.");
+    return;
+  }
+  // UI feedback
+  const btn = copyClipboard100Btn;
+  const prevText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Copying…";
+
+  try {
+    // Force 100% zoom and render before grabbing pixels
+    state.viewScale = 1;
+    await forceNextPaint();
+
+    // Read pixels as PNG from the on-screen canvas
+    const blob = await canvasToBlob(canvasEl, "image/png");
+    await writeImageToClipboard(blob);
+
+    btn.textContent = "Copied!";
+    // Leave zoom at 100% as requested (do not restore previous zoom)
+  } catch (err) {
+    console.error(err);
+    // Fallback: offer a download if clipboard API is unavailable
+    try {
+      const blob = await canvasToBlob(canvasEl, "image/png");
+      const url = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement("a"), { href: url, download: "canvas-100.png" });
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      btn.textContent = "Downloaded (fallback)";
+    } catch (e2) {
+      alert("Failed to copy or download PNG.");
+      btn.textContent = prevText;
+    }
+  } finally {
+    setTimeout(()=>{ if (!btn.disabled) return; btn.disabled = false; btn.textContent = prevText; }, 900);
+  }
+});
 
 // Commit
 commitBtn?.addEventListener("click", () => {
@@ -178,6 +223,37 @@ async function loadFileToState(file){
 
 // Debounced render
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
+
+// Ensure next paint happens (await a full rAF cycle after scheduling a render)
+function forceNextPaint(){
+  return new Promise(resolve=>{
+    // schedule render now
+    requestRender();
+    // wait two rAF ticks to be safe (render may itself schedule)
+    requestAnimationFrame(()=> requestAnimationFrame(resolve));
+  });
+}
+
+// Canvas → Blob helper
+function canvasToBlob(canvas, mime="image/png"){
+  return new Promise((resolve, reject)=>{
+    if (!canvas) return reject(new Error("No canvas"));
+    canvas.toBlob((blob)=>{
+      if (!blob) return reject(new Error("toBlob() failed"));
+      resolve(blob);
+    }, mime);
+  });
+}
+
+// Clipboard write helper
+async function writeImageToClipboard(blob){
+  if (navigator.clipboard && window.ClipboardItem) {
+    const item = new ClipboardItem({ [blob.type]: blob });
+    await navigator.clipboard.write([item]);
+  } else {
+    throw new Error("Clipboard API not available");
+  }
+}
 
 // ================== Photopea roundtrip integration ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
@@ -255,7 +331,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
-// Helper: canvas → ArrayBuffer
+// Helper: canvas → ArrayBuffer (for Photopea export)
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
