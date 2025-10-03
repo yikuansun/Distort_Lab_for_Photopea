@@ -34,10 +34,9 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1; // last successfully applied frame seq
-let currentLoadId  = 0;  // monotonically increasing load generation
+let lastSeqApplied = -1;
+let currentLoadId  = 0;
 
-// For unique export names (if needed elsewhere)
 let exportSeq = 0;
 
 // ---------- Boot ----------
@@ -95,7 +94,6 @@ window.addEventListener("paste", async (ev) => {
   if (file) await loadFileToState(file);
 });
 
-// NOTE: default loader for user-picked files (kept as <img>-based)
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -103,7 +101,7 @@ async function loadFileToState(file){
     state.image = img;
     placeholderEl.style.display = "none";
     canvasEl.style.display = "";
-    await drawSource();
+    await drawSource();              // <<< ensure pipeline has the source
     fitToView(); requestRender();
     URL.revokeObjectURL(url);
   };
@@ -182,7 +180,6 @@ let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=req
 // ================== Photopea roundtrip integration ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
-// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -193,7 +190,7 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
-// --- CRC32 (for debugging payload identity) ---
+// CRC32 (debug)
 function crc32_ab(ab){
   let crc = 0 ^ (-1);
   const view = new Uint8Array(ab);
@@ -207,10 +204,8 @@ function crc32_ab(ab){
   return (crc ^ (-1)) >>> 0;
 }
 
-// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
-  const origin = ev.origin;
-  if (origin !== "https://pt-home.github.io") return;
+  if (ev.origin !== "https://pt-home.github.io") return;
   const msg = ev.data || {};
   if (msg.sessionId && sessionId && msg.sessionId !== sessionId) return;
 
@@ -221,92 +216,61 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
-
-    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
-
-    // Begin a new load generation
     const loadId = ++currentLoadId;
 
-    // Compute CRC for logging and compare with plugin-provided one
     const crcHere = crc32_ab(msg.buffer);
     LL(`← LAB_IMAGE seq=${seq}, bytes=${msg.buffer.byteLength}, loadId=${loadId}, crc=${crcHere}` + (msg.crc ? ` (plugin=${msg.crc})` : ""));
 
-    // ---- HARD RESET before loading the new image ----
+    // Hard reset
     try {
-      if (raf) { cancelAnimationFrame(raf); raf = 0; } // cancel pending repaint
-
-      // wipe pixels and backing store
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-      if (ctx) { ctx.clearRect(0, 0, canvasEl.width, canvasEl.height); }
-      canvasEl.width = 0;
-      canvasEl.height = 0;
-
-      // Show placeholder and hide canvas until the new frame is ready
-      placeholderEl.style.display = "";
-      canvasEl.style.display = "none";
-
-      // Drop previous references which could affect pipeline
-      state.image = null;
-      state.sourceCommitted = null;
-      state.sourceCanvas = null;
-      state.sourceCtx = null;
-    } catch (e) {
-      console.warn("Failed to reset canvas before new load:", e);
-    }
-    // -------------------------------------------------
+      if (ctx) ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      canvasEl.width = 0; canvasEl.height = 0;
+      placeholderEl.style.display = ""; canvasEl.style.display = "none";
+      state.image = null; state.sourceCommitted = null; state.sourceCanvas = null; state.sourceCtx = null;
+    } catch(e) { console.warn("Reset failed:", e); }
 
     try{
-      // Decode with createImageBitmap to avoid <img> caching weirdness
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const bitmap = await createImageBitmap(blob);
-
-      // Paint bitmap directly at native resolution
       const w = bitmap.width, h = bitmap.height;
-      canvasEl.width = w;
-      canvasEl.height = h;
 
+      canvasEl.width = w; canvasEl.height = h;
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(bitmap, 0, 0);
 
-      // Make it visible
       placeholderEl.style.display = "none";
       canvasEl.style.display = "";
 
-      // Ensure one paint frame
       await nextRafPaint();
       LL("painted seq="+seq+` at ${w}x${h}`);
 
-      // To keep the rest of the pipeline happy, refresh state.image as an <img>
-      // by snapshotting the current canvas. This guarantees subsequent filters
-      // operate on the exact pixels we just drew.
+      // Snapshot → state.image
       const snapBlob = await canvasToBlob(canvasEl);
       const snapUrl  = URL.createObjectURL(snapBlob);
       await new Promise((res)=>{
-        const tag = new Image();
-        tag.onload = ()=>{
-          state.image = tag;
-          URL.revokeObjectURL(snapUrl);
-          res();
-        };
-        tag.src = snapUrl;
+        const img = new Image();
+        img.onload = ()=>{ state.image = img; URL.revokeObjectURL(snapUrl); res(); };
+        img.src = snapUrl;
       });
+
+      // >>> FIX: prepare pipeline source
+      await drawSource();
 
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
 
-      // Fit and render once more so UI / zoom are consistent
       fitToView();
       requestRender();
 
-      // Mark applied only AFTER the image is visible
       lastSeqApplied = seq;
-
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
@@ -317,7 +281,7 @@ window.addEventListener("message", async (ev)=>{
   }
 });
 
-// ---------- Export to Photopea (new document) ----------
+// ---------- Export to Photopea ----------
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
@@ -331,7 +295,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error("Failed to export PNG to Photopea."); alert("Failed to export PNG to Photopea."); }
 });
 
-// ---------- Copy to Clipboard (original size) with fallback ----------
+// ---------- Copy to Clipboard (original size) ----------
 copyBtn?.addEventListener("click", async ()=>{
   if (!canvasEl || !state.image) return;
   try{
@@ -347,7 +311,6 @@ copyBtn?.addEventListener("click", async ()=>{
         LP("→ LAB_EXPORT (fallback)", ab.byteLength, "bytes");
         try { window.opener.focus(); } catch {}
       } else {
-        // Last resort: download
         const blob2 = new Blob([ab], { type: "image/png" });
         const url = URL.createObjectURL(blob2);
         const a = Object.assign(document.createElement("a"), { href:url, download:"distorted.png" });
@@ -380,11 +343,6 @@ function canvasToBlob(canvas){
   });
 }
 
-/**
- * Render the current filter output at original image resolution into the visible canvas,
- * extract a PNG Blob, then restore the previous canvas size / zoom and repaint.
- * This guarantees 1:1 pixels without changing the user's visible state.
- */
 async function exportOriginalBlobFromVisibleCanvas(){
   const { image } = state;
   if (!image) throw new Error("No image loaded");
@@ -392,36 +350,21 @@ async function exportOriginalBlobFromVisibleCanvas(){
   const naturalW = image.naturalWidth || image.width;
   const naturalH = image.naturalHeight || image.height;
 
-  // Save current canvas state
-  const prevW = canvasEl.width;
-  const prevH = canvasEl.height;
-  const prevScale = state.viewScale;
+  const prevW = canvasEl.width, prevH = canvasEl.height, prevScale = state.viewScale;
 
-  // Switch to original resolution and scale 1:1 for a single paint
-  canvasEl.width = naturalW;
-  canvasEl.height = naturalH;
-  state.viewScale = 1;
-
-  // Ensure the pipeline paints at the new backing size
+  canvasEl.width = naturalW; canvasEl.height = naturalH; state.viewScale = 1;
   await nextRafPaint();
   const blob = await canvasToBlob(canvasEl);
 
-  // Restore previous state and repaint
-  canvasEl.width = prevW;
-  canvasEl.height = prevH;
-  state.viewScale = prevScale;
+  canvasEl.width = prevW; canvasEl.height = prevH; state.viewScale = prevScale;
   await nextRafPaint();
 
   return blob;
 }
-
 async function exportOriginalArrayBufferFromVisibleCanvas(){
   const blob = await exportOriginalBlobFromVisibleCanvas();
-  const buf = await blob.arrayBuffer();
-  return buf;
+  return await blob.arrayBuffer();
 }
-
-// Wait for two RAFs to ensure render() completed a frame at the new size
 function nextRafPaint(){
   return new Promise((res)=>{
     requestAnimationFrame(()=>{
