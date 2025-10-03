@@ -42,11 +42,10 @@ let lastSeqApplied = -1; // last confirmed seq that was actually rendered
 let currentLoadId  = 0;  // monotonic load generation id
 
 // ---------- Boot ----------
-// IMPORTANT: initCanvas FIRST so that getCanvasRefs() (used in initState) returns valid srcCanvas/srcCtx
+// Important: init canvas first so state picks up valid offscreen buffers.
 await initCanvas();
 await initState();
 
-// Sanity log (one-time): ensure we have offscreen buffers published
 console.log("[DL-LAB] boot refs", {
   view: !!state.canvas, viewCtx: !!state.ctx,
   src: !!state.srcCanvas, srcCtx: !!state.srcCtx
@@ -319,14 +318,25 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
     if (window.opener && !window.opener.closed) {
-      window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
+      window.opener.postMessage(
+        { type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab },
+        "https://pt-home.github.io",
+        [ab]
+      );
       LP("→ LAB_EXPORT", ab.byteLength, "bytes");
+
+      // --- Focus Photopea/plugin frame after export ---
+      try { window.opener.focus(); } catch(_) {}
+      // Some browsers throttle focus; poke again in a microtask and after a short delay
+      Promise.resolve().then(()=> { try { window.opener && window.opener.focus(); } catch(_) {} });
+      setTimeout(()=> { try { window.opener && window.opener.focus(); } catch(_) {} }, 120);
     } else {
       alert("Plugin window is not available. Please start from the Photopea plugin panel.");
     }
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
+// Helper: canvas → ArrayBuffer (for Photopea export)
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
