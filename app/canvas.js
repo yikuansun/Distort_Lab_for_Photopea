@@ -29,8 +29,7 @@ export async function drawSource() {
   const img = state.image;
   if (!img) return;
 
-  // Ensure canvas has some sensible size (engine.js will draw using viewScale).
-  // We keep canvas' "logical" size equal to the source size; engine handles scaling.
+  // Ensure canvas has the source size; engine.js handles scaling for view.
   const w = img.naturalWidth || img.width || 0;
   const h = img.naturalHeight || img.height || 0;
   if (!w || !h) return;
@@ -103,7 +102,7 @@ export async function commitToSource() {
 
     await new Promise((resolve, reject) => {
       img.onload = () => resolve();
-      img.onerror = (e) => reject(new Error("Committed image failed to load"));
+      img.onerror = () => reject(new Error("Committed image failed to load"));
       img.src = url;
     });
 
@@ -123,4 +122,11 @@ export async function commitToSource() {
   } finally {
     committing = false;
   }
+}
+
+/**
+ * Expose raw canvas and context for modules that need them.
+ */
+export function getCanvasRefs() {
+  return { canvas, ctx };
 }
