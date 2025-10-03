@@ -23,7 +23,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Distort Lab for Photopea2</h1>
+    <h1>Distort Lab for Photopea</h1>
     <p>Send the active layer to Distort Lab, tweak distortions, then export back as a new Photopea document.</p>
     <button id="sendBtn" class="btn">Send to Lab</button>
     <div class="note" id="status"></div>
@@ -41,18 +41,19 @@
     const APPLIED_TIMEOUT_MS  = 1300;
     const APPLIED_RETRIES     = 1;
 
-    // After pp:saveToOE, collect buffers for this long and pick the last one
-    const POST_SAVE_BUFFER_WINDOW_MS = 160;
+    // Buffer collection windows around saveToOE
+    const PRE_BUFFER_WINDOW_MS  = 300;   // accept the last pre-save buffer if it arrived ≤ this before :pre
+    const POST_BUFFER_WINDOW_MS = 220;   // collect buffers after :pre and pick the last
 
     // ---------------- State ----------------
     let sessionId   = null;
     let labWin      = null;
     let labIsReady  = false;
 
-    // Current operation FSM (one send action)
-    let op = null; // { id, armed, sent, buffers[], windowTimer }
+    // Current send operation
+    let op = null; // { id, armed, sent, buffers[], windowTimer, lastPreBuf:{ab,t} }
 
-    // Pending delivery to Lab (after we pick a buffer)
+    // Pending delivery to Lab
     let pendingPng  = null;
     let pendingName = "from-photopea.png";
     let pendingSeq  = -1;
@@ -96,10 +97,9 @@
       LL("→ LAB_OPEN", msg);
     }
 
-    // ---------------- Build PP script for this operation ----------------
+    // ---------------- Build PP script for this op ----------------
     function buildPhotopeaScript(opId){
-      const tmpName = "DL Temp " + Date.now(); // unique temp document name
-      // Inject opId into echoToOE markers so we can correlate logs if needed.
+      const tmpName = "DL Temp " + Date.now(); // unique temp document name per op
       return `
       (function(){
         try{
@@ -127,7 +127,9 @@
 
           try { tmp.trimTransparent(); app.echoToOE("pp:op:${opId}:trim"); } catch(e){}
 
-          try { tmp.saveToOE("png"); app.echoToOE("pp:op:${opId}:saveToOE"); }
+          // IMPORTANT: mark PRE before calling saveToOE, then POST after
+          app.echoToOE("pp:op:${opId}:saveToOE:pre");
+          try { tmp.saveToOE("png"); app.echoToOE("pp:op:${opId}:saveToOE:post"); }
           catch(e){ app.echoToOE("pp:op:${opId}:err:saveToOE:"+e); }
 
           try { tmp.close(); app.echoToOE("pp:op:${opId}:close"); } catch(e){ app.echoToOE("pp:op:${opId}:err:close:"+e); }
@@ -143,11 +145,9 @@
 
     // ---------------- Orchestrate one send operation ----------------
     function startOperation(){
-      // Cancel previous op (if any)
       if (op && op.windowTimer) { clearTimeout(op.windowTimer); }
-      op = { id: ("op-"+Date.now()+"-"+Math.random().toString(36).slice(2)), armed:false, sent:false, buffers:[], windowTimer:null };
+      op = { id: ("op-"+Date.now()+"-"+Math.random().toString(36).slice(2)), armed:false, sent:false, buffers:[], windowTimer:null, lastPreBuf:null };
 
-      // Ask Photopea to produce a fresh PNG for this op
       const script = buildPhotopeaScript(op.id);
       window.parent.postMessage(script, PHOTOPEA_ORIGIN);
       setStatus("Requesting active layer from Photopea…");
@@ -157,12 +157,23 @@
     // ---------------- Delivery to Lab ----------------
     function pickAndSendBufferForCurrentOp(){
       if (!op || op.sent) return;
-      const last = op.buffers.length ? op.buffers[op.buffers.length - 1] : null;
-      if (!last) {
-        L("No buffers collected in window after saveToOE (opId=", op.id, ")");
+
+      // Prefer buffers collected after :pre; if none, fallback to last pre-save buf within window
+      let candidate = null;
+      if (op.buffers.length) {
+        candidate = op.buffers[op.buffers.length - 1];
+        L("Picked POST buffer", candidate.byteLength, "bytes", "opId=", op.id);
+      } else if (op.lastPreBuf && (Date.now() - op.lastPreBuf.t) <= PRE_BUFFER_WINDOW_MS) {
+        candidate = op.lastPreBuf.ab;
+        L("Picked fallback PRE buffer", candidate.byteLength, "bytes", "opId=", op.id);
+      }
+
+      if (!candidate) {
+        L("No buffers collected around saveToOE (opId=", op.id, ")");
         return;
       }
-      pendingPng  = last;
+
+      pendingPng  = candidate;
       pendingName = "from-photopea.png";
       sendImageToLab();
       op.sent = true;
@@ -225,37 +236,38 @@
         if (ev.data === "done") return;
 
         if (ev.data instanceof ArrayBuffer) {
-          // Buffer from OE
-          if (op && op.armed && !op.sent) {
-            op.buffers.push(ev.data);
-            LP("Photopea → plugin: ArrayBuffer (armed)", ev.data.byteLength, "bytes", "opId=", op.id, "count=", op.buffers.length);
-            // Wait for window to close, then pick last
+          const now = Date.now();
+          if (op) {
+            if (op.armed && !op.sent) {
+              op.buffers.push(ev.data);
+              LP("Photopea → plugin: ArrayBuffer (POST armed)", ev.data.byteLength, "bytes", "opId=", op.id, "count=", op.buffers.length);
+              // wait for window to elapse
+            } else {
+              op.lastPreBuf = { ab: ev.data, t: now };
+              LP("Photopea → plugin: ArrayBuffer (PRE captured)", ev.data.byteLength, "bytes", "opId=", op.id);
+            }
           } else {
-            LP("Photopea → plugin: ArrayBuffer (ignored pre-save)");
+            LP("Photopea → plugin: ArrayBuffer (no active op, ignored)");
           }
           return;
         }
 
         if (typeof ev.data === "string") {
-          // String diagnostics from our PP script
           const s = ev.data;
           LP("Photopea:", s);
 
-          // Arm only when saveToOE of our current op happens
-          if (op && s.indexOf("pp:op:"+op.id+":saveToOE") === 0) {
+          // Arm at :saveToOE:pre (buffer may be emitted immediately at save call)
+          if (op && s.indexOf("pp:op:"+op.id+":saveToOE:pre") === 0) {
             op.armed = true;
             if (op.windowTimer) clearTimeout(op.windowTimer);
+
+            // If we already have a PRE buffer from just before :pre, we'll consider it too
             op.windowTimer = setTimeout(()=>{
               pickAndSendBufferForCurrentOp();
               op.windowTimer = null;
-            }, POST_SAVE_BUFFER_WINDOW_MS);
-            setStatus("Waiting for image buffer after save…");
-          }
+            }, POST_BUFFER_WINDOW_MS);
 
-          // Optional status updates (not required for logic)
-          if (s.indexOf("pp:op:") === 0 && s.endsWith(":done")) {
-            // We'll still rely on the buffer window, not on :done event.
-            // No action needed.
+            setStatus("Waiting for image buffer after save…");
           }
           return;
         }
