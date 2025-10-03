@@ -1,39 +1,59 @@
-import { getCanvasRefs } from "./canvas.js";
+import { state } from "./state.js";
+
+/** Initialize visible canvas (no-op holder, kept for symmetry). */
+export async function initCanvas(){
+  const view = document.getElementById("view");
+  // Ensure white background and 2D context set with willReadFrequently for filters
+  view.getContext("2d", { willReadFrequently: true });
+}
 
 /**
- * Global application state (single source of truth).
+ * Rebuild source canvas from state.image.
+ * If `force` is true, always recreate / redraw even if dimensions are the same.
  */
-export const state = {
-  image: null,                   // HTMLImageElement
-  canvas: null, ctx: null,       // visible canvas + 2D context
-  srcCanvas: null, srcCtx: null, // offscreen source buffer (original pixels 1:1)
-  filterId: null,                // current filter id
-  params: {},                    // parameter snapshots per filter id
-  currentFilter: null,           // registry entry for the current filter
-  viewScale: 1,                  // zoom scale applied to the output canvas
-};
+export async function drawSource(force = false){
+  const img = state.image;
+  if (!img) return;
 
-export async function initState() {
-  const { canvas, ctx, srcCanvas, srcCtx } = getCanvasRefs();
-  state.canvas = canvas; state.ctx = ctx;
-  state.srcCanvas = srcCanvas; state.srcCtx = srcCtx;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
 
-  // Expose for quick debugging (core does not rely on this).
-  try { window.state = state; } catch (_) {}
+  // If not forcing and size matches, we could early-return.
+  // BUT for reliability with Photopea roundtrip we always redraw.
+  if (!state.sourceCanvas || force) {
+    state.sourceCanvas = document.createElement("canvas");
+    state.sourceCtx = state.sourceCanvas.getContext("2d", { willReadFrequently: true });
+  }
+
+  state.sourceCanvas.width = w;
+  state.sourceCanvas.height = h;
+  state.sourceCtx.clearRect(0,0,w,h);
+  state.sourceCtx.drawImage(img, 0, 0, w, h);
+
+  // Bump version for debugging / race detection
+  state.sourceVersion = (state.sourceVersion || 0) + 1;
+  // eslint-disable-next-line no-console
+  console.log("%c[DL-LAB]", "color:#58a6ff", `drawSource: ${w}x${h} sourceVersion=${state.sourceVersion}`);
 }
 
-export function setFilterId(id) {
-  state.filterId = id;
+/** Fit visible canvas to current image size and view scale. */
+export function fitToView(){
+  const view = document.getElementById("view");
+  if (!state.sourceCanvas) return;
+  view.width  = state.sourceCanvas.width;
+  view.height = state.sourceCanvas.height;
+  state.viewScale = 1;
 }
 
-export function setParam(fid, key, val) {
-  state.params[fid][key] = coerce(val);
-}
-
-function coerce(v) {
-  if (typeof v === "string" && v.trim() === "") return v;
-  if (!isNaN(v) && v !== "") return Number(v);
-  if (v === "true") return true;
-  if (v === "false") return false;
-  return v;
+/** Commit filtered result back into sourceCanvas (used by "Commit changes"). */
+export function commitToSource(){
+  const view = document.getElementById("view");
+  if (!state.sourceCanvas) return;
+  const w = view.width, h = view.height;
+  state.sourceCanvas.width = w;
+  state.sourceCanvas.height = h;
+  state.sourceCtx.clearRect(0,0,w,h);
+  state.sourceCtx.drawImage(view, 0, 0);
+  state.sourceCommitted = true;
+  state.sourceVersion = (state.sourceVersion || 0) + 1;
 }
