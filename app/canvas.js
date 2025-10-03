@@ -1,71 +1,67 @@
 // canvas.js
-// Canvas setup, view helpers, PNG export, and reliable "commit to source".
+// Visible canvas (#view), OFFSCREEN source buffer (srcCanvas), PNG export, commit.
 
 import { state } from "./state.js";
 
-// Keep references to the main canvas and its 2D context.
-let canvas, ctx;
+let canvas, ctx;        // visible
+let srcCanvas, srcCtx;  // offscreen 1:1 source
 
-// Guard to prevent overlapping commits (but allows subsequent commits).
 let committing = false;
 
-/**
- * Initialize canvas and 2D context.
- */
+/** Init visible and offscreen canvases */
 export async function initCanvas() {
   canvas = document.getElementById("view");
   if (!canvas) throw new Error("#view canvas not found");
   ctx = canvas.getContext("2d", { willReadFrequently: true });
-  // Initialize view scale if not present
+
+  srcCanvas = document.createElement("canvas");
+  srcCtx    = srcCanvas.getContext("2d", { willReadFrequently: true });
+
   if (typeof state.viewScale !== "number") state.viewScale = 1;
+
+  // publish into state so engine can pick them up
+  state.canvas = canvas; state.ctx = ctx;
+  state.srcCanvas = srcCanvas; state.srcCtx = srcCtx;
 }
 
-/**
- * Draws the current source image into an internal buffer if needed
- * and ensures the visible canvas has correct dimensions for rendering.
- * The actual filter rendering is handled by engine.js -> render().
- */
+/** Put current state.image into OFFSCREEN srcCanvas (1:1 pixels) */
 export async function drawSource() {
   const img = state.image;
   if (!img) return;
 
-  // Ensure canvas has the source size; engine.js handles scaling for view.
   const w = img.naturalWidth || img.width || 0;
   const h = img.naturalHeight || img.height || 0;
   if (!w || !h) return;
 
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
+  if (srcCanvas.width !== w || srcCanvas.height !== h) {
+    srcCanvas.width = w;
+    srcCanvas.height = h;
   }
+  srcCtx.setTransform(1,0,0,1,0,0);
+  srcCtx.clearRect(0,0,w,h);
+  srcCtx.drawImage(img, 0, 0, w, h);
 
-  // Clear any previous content; actual filter pass will overwrite anyway.
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // bump source version so engine refreshes ImageData cache
+  state.sourceVersion = (state.sourceVersion || 0) + 1;
 }
 
-/**
- * Adjust view scale to fit the image into the stage (white area).
- * This modifies state.viewScale; engine.js uses it on render().
- */
+/** Compute zoom so the image fits the white stage */
 export function fitToView() {
   const stage = document.getElementById("stage");
   if (!stage || !state.image) return;
 
   const bounds = stage.getBoundingClientRect();
-  const pad = 24; // stage padding
-  const availW = Math.max(50, bounds.width - pad * 2);
-  const availH = Math.max(50, bounds.height - pad * 2);
+  const pad = 24;
+  const availW = Math.max(50, bounds.width  - pad*2);
+  const availH = Math.max(50, bounds.height - pad*2);
 
-  const imgW = state.image.naturalWidth || state.image.width || 1;
-  const imgH = state.image.naturalHeight || state.image.height || 1;
+  const imgW = state.image.naturalWidth || state.image.width  || 1;
+  const imgH = state.image.naturalHeight|| state.image.height || 1;
 
-  const scale = Math.max(0.05, Math.min(8, Math.min(availW / imgW, availH / imgH)));
-  state.viewScale = scale;
+  state.viewScale = Math.max(0.05, Math.min(8, Math.min(availW/imgW, availH/imgH)));
 }
 
-/**
- * Export visible canvas as PNG (what you see is what you get).
- */
+/** Export what you see */
 export function exportPNG(filename = "distort.png") {
   if (!canvas || !canvas.width || !canvas.height) return;
   canvas.toBlob((blob) => {
@@ -79,54 +75,49 @@ export function exportPNG(filename = "distort.png") {
   }, "image/png");
 }
 
-/**
- * Commit the current visible output back into the source image.
- * This makes the current canvas pixels become the new state.image.
- * Reliable across multiple sequential commits.
- */
+/** Bake current visible result back into srcCanvas (new source) */
 export async function commitToSource() {
-  if (!canvas || !state.image) return;
-  if (committing) return; // ignore rapid double-clicks; next click will work
+  if (!canvas) return;
+  if (committing) return;
   committing = true;
 
   try {
-    // 1) Read current canvas -> Blob
-    const blob = await new Promise((resolve, reject) => {
-      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob() failed"))), "image/png");
+    const blob = await new Promise((res, rej)=>{
+      canvas.toBlob(b => b ? res(b) : rej(new Error("toBlob() failed")), "image/png");
     });
 
-    // 2) Create an object URL and Image
     const url = URL.createObjectURL(blob);
     const img = new Image();
     img.crossOrigin = "anonymous";
 
-    await new Promise((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error("Committed image failed to load"));
+    await new Promise((res, rej)=>{
+      img.onload = res;
+      img.onerror = ()=>rej(new Error("Committed image failed to load"));
       img.src = url;
     });
 
-    // 3) Swap in as the new source & bump revision to kill any caches
-    state.image = img;
-    state.sourceVersion = (state.sourceVersion || 0) + 1;
+    const w = img.naturalWidth || img.width || 0;
+    const h = img.naturalHeight || img.height || 0;
 
-    // 4) Resize the canvas to match new source and clear (engine will re-render)
-    if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+    if (w && h) {
+      if (srcCanvas.width !== w || srcCanvas.height !== h) {
+        srcCanvas.width = w; srcCanvas.height = h;
+      }
+      srcCtx.setTransform(1,0,0,1,0,0);
+      srcCtx.clearRect(0,0,w,h);
+      srcCtx.drawImage(img, 0, 0, w, h);
+
+      state.image = img; // корисно для fitToView
+      state.sourceVersion = (state.sourceVersion || 0) + 1;
     }
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 5) Cleanup URL
     URL.revokeObjectURL(url);
   } finally {
     committing = false;
   }
 }
 
-/**
- * Expose raw canvas and context for modules that need them.
- */
+/** Expose refs */
 export function getCanvasRefs() {
-  return { canvas, ctx };
+  return { canvas, ctx, srcCanvas, srcCtx };
 }
