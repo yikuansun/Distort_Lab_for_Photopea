@@ -67,7 +67,7 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-// ---------- Image loading ----------
+// ---------- Image loading (manual / drag / paste) ----------
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -95,6 +95,7 @@ window.addEventListener("paste", async (ev) => {
   if (file) await loadFileToState(file);
 });
 
+// NOTE: default loader for user-picked files (kept as <img>-based)
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -192,6 +193,20 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
+// --- CRC32 (for debugging payload identity) ---
+function crc32_ab(ab){
+  let crc = 0 ^ (-1);
+  const view = new Uint8Array(ab);
+  for (let i=0; i<view.length; i++){
+    crc = (crc ^ view[i]) >>> 0;
+    for (let j=0;j<8;j++){
+      const mask = -(crc & 1);
+      crc = (crc >>> 1) ^ (0xEDB88320 & mask);
+    }
+  }
+  return (crc ^ (-1)) >>> 0;
+}
+
 // Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
@@ -215,43 +230,79 @@ window.addEventListener("message", async (ev)=>{
 
     // Begin a new load generation
     const loadId = ++currentLoadId;
-    LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
 
-    // ---- HARD RESET before loading the new image (simple & reliable) ----
+    // Compute CRC for logging and compare with plugin-provided one
+    const crcHere = crc32_ab(msg.buffer);
+    LL(`← LAB_IMAGE seq=${seq}, bytes=${msg.buffer.byteLength}, loadId=${loadId}, crc=${crcHere}` + (msg.crc ? ` (plugin=${msg.crc})` : ""));
+
+    // ---- HARD RESET before loading the new image ----
     try {
       if (raf) { cancelAnimationFrame(raf); raf = 0; } // cancel pending repaint
 
+      // wipe pixels and backing store
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
       if (ctx) { ctx.clearRect(0, 0, canvasEl.width, canvasEl.height); }
       canvasEl.width = 0;
       canvasEl.height = 0;
 
+      // Show placeholder and hide canvas until the new frame is ready
       placeholderEl.style.display = "";
       canvasEl.style.display = "none";
 
+      // Drop previous references which could affect pipeline
       state.image = null;
-      LL("clear-before-load: canvas reset; placeholder shown");
+      state.sourceCommitted = null;
+      state.sourceCanvas = null;
+      state.sourceCtx = null;
     } catch (e) {
       console.warn("Failed to reset canvas before new load:", e);
     }
-    // --------------------------------------------------------------------
+    // -------------------------------------------------
 
     try{
-      // Convert incoming ArrayBuffer to a File and load it
+      // Decode with createImageBitmap to avoid <img> caching weirdness
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
-      const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
+      const bitmap = await createImageBitmap(blob);
 
-      // Load file → decode image → draw → fit
-      await loadFileToState(file);
+      // Paint bitmap directly at native resolution
+      const w = bitmap.width, h = bitmap.height;
+      canvasEl.width = w;
+      canvasEl.height = h;
 
-      // Ensure one paint frame has happened
+      const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(bitmap, 0, 0);
+
+      // Make it visible
+      placeholderEl.style.display = "none";
+      canvasEl.style.display = "";
+
+      // Ensure one paint frame
       await nextRafPaint();
-      LL("painted seq="+seq);
+      LL("painted seq="+seq+` at ${w}x${h}`);
+
+      // To keep the rest of the pipeline happy, refresh state.image as an <img>
+      // by snapshotting the current canvas. This guarantees subsequent filters
+      // operate on the exact pixels we just drew.
+      const snapBlob = await canvasToBlob(canvasEl);
+      const snapUrl  = URL.createObjectURL(snapBlob);
+      await new Promise((res)=>{
+        const tag = new Image();
+        tag.onload = ()=>{
+          state.image = tag;
+          URL.revokeObjectURL(snapUrl);
+          res();
+        };
+        tag.src = snapUrl;
+      });
 
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
+
+      // Fit and render once more so UI / zoom are consistent
+      fitToView();
+      requestRender();
 
       // Mark applied only AFTER the image is visible
       lastSeqApplied = seq;
