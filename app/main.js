@@ -18,7 +18,7 @@ const zoomOutBtn    = document.getElementById("zoomOutBtn");
 const zoomInBtn     = document.getElementById("zoomInBtn");
 const zoom100Btn    = document.getElementById("zoom100Btn");
 
-// NEW: header button to copy canvas at enforced 100% (keeps 100% afterwards)
+// New: header button to copy canvas at enforced 100% (keeps 100% afterwards)
 const copyClipboard100Btn = document.getElementById("copyClipboard100Btn");
 
 const commitBtn     = document.getElementById("commitBtn");
@@ -38,8 +38,8 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1; // last successfully applied frame seq
-let currentLoadId  = 0;  // monotonically increasing load generation
+let lastSeqApplied = -1;
+let currentLoadId  = 0;
 
 // ---------- Boot ----------
 await initState();
@@ -60,7 +60,7 @@ state.currentFilter = registry[0];
 setFilterId(state.currentFilter.id);
 filterSelect.value = state.filterId;
 
-// Build UI
+// Build UI for current filter
 buildParamsPanel(
   paramsPanel,
   state.currentFilter,
@@ -157,10 +157,17 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
   }
 });
 
-// Commit (unchanged)
-commitBtn?.addEventListener("click", () => {
+// Commit: await the commit to reliably enable repeated commits
+commitBtn?.addEventListener("click", async () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
-  commitToSource(); fitToView(); requestRender();
+  commitBtn.disabled = true;
+  try {
+    await commitToSource();
+    fitToView();
+    requestRender();
+  } finally {
+    commitBtn.disabled = false;
+  }
 });
 
 // Defaults (unchanged)
@@ -174,7 +181,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// Presets
+// Presets (unchanged)
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -202,7 +209,7 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-// Common loader
+// Common loader (unchanged)
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -218,7 +225,7 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-// Debounced render
+// Debounced render (unchanged)
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
 
 // Ensure next paint happens after enforcing 100%
@@ -253,7 +260,6 @@ async function writeImageToClipboard(blob){
 // ================== Photopea roundtrip integration (unchanged) ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
-// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -264,7 +270,6 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
-// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -278,31 +283,21 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
-
-    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
-
-    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
-
     try{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
-
-      // Await decoding & drawing; if a newer load started, abort applying
       await loadFileToState(file);
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
-
-      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
-
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
