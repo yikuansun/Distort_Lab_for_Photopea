@@ -39,6 +39,7 @@
     const PHOTOPEA_ORIGIN = "https://www.photopea.com";
     const LAB_ORIGIN = "https://pt-home.github.io";
 
+    // Handshake / retry timings
     const READY_TIMEOUT_MS   = 1800;
     const READY_RETRIES      = 2;
     const APPLIED_TIMEOUT_MS = 1300;
@@ -49,12 +50,12 @@
     let labWin = null;
     let labIsReady = false;
 
-    let pendingPng = null;
+    let pendingPng = null;        // last PNG buffer waiting to be delivered
     let pendingName = "from-photopea.png";
-    let pendingSeq = -1;
-    let seqCounter = 0;
-    let appliedTimer = null;
-    let appliedTries = 0;
+    let pendingSeq = -1;          // seq number of the last send
+    let seqCounter = 0;           // monotonically increasing sequence id
+    let appliedTimer = null;      // retry timer handle
+    let appliedTries = 0;         // retry counter for APPLIED wait
 
     const statusEl = document.getElementById("status");
     const sendBtn  = document.getElementById("sendBtn");
@@ -80,7 +81,7 @@
         L("Opened Lab tab:", url);
       } else {
         labWin.focus();
-        sendLAB_OPEN();
+        sendLAB_OPEN(); // re-announce
         setStatus("Distort Lab focused.");
       }
     }
@@ -92,31 +93,50 @@
       LL("→ LAB_OPEN", msg);
     }
 
-    // ---------------- Ask Photopea for active layer ----------------
+    // ---------------- Clipboard-based layer export (Photopea) ----------------
     function askPhotopeaForActiveLayer(){
+      // Copy active layer → create temp doc with same params → paste → (trim) → saveToOE('png') → close
       const script = `
       (function(){
         try{
           app.echoToOE("pp:begin");
+
           var src = app.activeDocument;
           if (!src){ app.echoToOE("pp:err:no-doc"); return; }
+
           var ly = src.activeLayer;
           if (!ly){ app.echoToOE("pp:err:no-active-layer"); return; }
 
-          try { ly.copy(); app.echoToOE("pp:copy:layer"); } catch(e){ app.echoToOE("pp:err:copy:"+e); return; }
-          var w = src.width  || 1024, h = src.height || 1024, res = src.resolution || 72;
-          var mode = src.mode || "RGB"; if (typeof mode !== "string") mode = "RGB";
+          try { ly.copy(); app.echoToOE("pp:copy:layer"); }
+          catch(e){ app.echoToOE("pp:err:copy:"+e); return; }
+
+          var w = src.width  || 1024;
+          var h = src.height || 1024;
+          var res  = src.resolution || 72;
+          var mode = src.mode || "RGB";
+          if (typeof mode !== "string") mode = "RGB";
 
           var tmp = app.documents.add(w, h, res, "DL Temp", mode);
           app.echoToOE("pp:new:"+w+"x"+h+"@"+res+" "+mode);
-          try { tmp.paste(); app.echoToOE("pp:paste"); } catch(e){ app.echoToOE("pp:err:paste:"+e); try{ tmp.close(); }catch(_){} return; }
+
+          try { tmp.paste(); app.echoToOE("pp:paste"); }
+          catch(e){ app.echoToOE("pp:err:paste:"+e); try{ tmp.close(); }catch(_){} return; }
+
           try { tmp.trimTransparent(); app.echoToOE("pp:trim"); } catch(e){}
-          try { tmp.saveToOE("png"); app.echoToOE("pp:saveToOE"); } catch(e){ app.echoToOE("pp:err:saveToOE:"+e); }
+
+          try { tmp.saveToOE("png"); app.echoToOE("pp:saveToOE"); }
+          catch(e){ app.echoToOE("pp:err:saveToOE:"+e); }
+
           try { tmp.close(); app.echoToOE("pp:close"); } catch(e){ app.echoToOE("pp:err:close:"+e); }
+
           try { app.activeDocument = src; } catch(e){}
+
           app.echoToOE("pp:done");
-        }catch(err){ app.echoToOE("pp:err:outer:"+err); }
-      })();`;
+        }catch(err){
+          app.echoToOE("pp:err:outer:"+err);
+        }
+      })();
+      `;
       window.parent.postMessage(script, PHOTOPEA_ORIGIN);
       setStatus("Requesting active layer from Photopea…");
       L("Requested active layer from Photopea (copy→new→paste→OE).");
@@ -132,6 +152,7 @@
       if (appliedTimer) { clearTimeout(appliedTimer); appliedTimer = null; }
 
       const msg = { type:"LAB_IMAGE", sessionId, seq: pendingSeq, mime:"image/png", name: pendingName, buffer: pendingPng };
+      // no transferables → we can retry if APPLIED does not arrive
       labWin.postMessage(msg, LAB_ORIGIN);
       LL("→ LAB_IMAGE (seq="+pendingSeq+", no transfer)", {size: pendingPng.byteLength, name: pendingName});
 
@@ -147,15 +168,16 @@
           return;
         }
         appliedTries++;
+        // Re-send same seq + same buffer
         if (labWin && !labWin.closed && pendingPng && pendingSeq >= 0) {
           labWin.postMessage({ type:"LAB_IMAGE", sessionId, seq: pendingSeq, mime:"image/png", name: pendingName, buffer: pendingPng }, LAB_ORIGIN);
           LL("→ LAB_IMAGE (retry, seq="+pendingSeq+")");
-          waitForAppliedThenFocus();
+          waitForAppliedThenFocus(); // set next wait
         }
       }, APPLIED_TIMEOUT_MS);
     }
 
-    // ---------------- Handshake ----------------
+    // ---------------- Handshake: wait until Lab is READY, then send ----------------
     function waitForLabReadyThenSend(){
       let tries = 0;
       (function attempt(){
@@ -165,17 +187,6 @@
         sendLAB_OPEN();
         setTimeout(()=> labIsReady ? sendImageToLab() : attempt(), READY_TIMEOUT_MS);
       })();
-    }
-
-    // --------- Focus helpers (work inside Photopea context) ---------
-    function focusPhotopeaWindow() {
-      // best-effort attempts; browsers можуть ігнорувати перший виклик
-      try { window.top && window.top.focus && window.top.focus(); } catch(_) {}
-      try { window.parent && window.parent.focus && window.parent.focus(); } catch(_) {}
-      try { window.focus && window.focus(); } catch(_) {}
-      setTimeout(()=> {
-        try { window.top && window.top.focus && window.top.focus(); } catch(_) {}
-      }, 120);
     }
 
     // ---------------- Events ----------------
@@ -192,7 +203,7 @@
         if (ev.data === "done") return;
 
         if (ev.data instanceof ArrayBuffer) {
-          pendingPng = ev.data;
+          pendingPng = ev.data; // keep a copy (no ownership transfer)
           LP("Photopea → plugin: ArrayBuffer", pendingPng.byteLength, "bytes");
           setStatus("Image received from Photopea.");
           waitForLabReadyThenSend();
@@ -219,12 +230,14 @@
         }
 
         if (msg.type === "LAB_IMAGE_APPLIED") {
+          // Accept only if it's for the currently pending seq
           if (typeof msg.seq === "number" && msg.seq === pendingSeq) {
             LL("← LAB_IMAGE_APPLIED seq="+msg.seq);
+            // clear pending and cancel retry
             pendingPng = null;
             if (appliedTimer) { clearTimeout(appliedTimer); appliedTimer = null; }
             setStatus("Image applied in Distort Lab.");
-            // не фокусуємо тут – фокус буде при зворотному експорті
+            try { labWin && labWin.focus(); } catch(e){}
           } else {
             LL("← LAB_IMAGE_APPLIED (stale) seq="+msg.seq+" while pendingSeq="+pendingSeq);
           }
@@ -233,18 +246,9 @@
 
         if (msg.type === "LAB_EXPORT" && msg.buffer instanceof ArrayBuffer) {
           LL("← LAB_EXPORT", msg.buffer.byteLength, "bytes");
-          // Forward PNG to Photopea (new document)
+          // Forward PNG to Photopea as a new document (no renaming)
           window.parent.postMessage(msg.buffer, PHOTOPEA_ORIGIN, [msg.buffer]);
           setStatus("Exported back to Photopea as a new document.");
-
-          // <<< Focus Photopea UI now >>>
-          focusPhotopeaWindow();
-          return;
-        }
-
-        // Optional: explicit focus request from Lab
-        if (msg.type === "LAB_FOCUS") {
-          focusPhotopeaWindow();
           return;
         }
       }
