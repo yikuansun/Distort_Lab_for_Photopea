@@ -18,7 +18,7 @@ const zoomOutBtn    = document.getElementById("zoomOutBtn");
 const zoomInBtn     = document.getElementById("zoomInBtn");
 const zoom100Btn    = document.getElementById("zoom100Btn");
 
-// New button (copy current canvas at 100% to clipboard)
+// NEW: header button to copy canvas at enforced 100%
 const copyClipboard100Btn = document.getElementById("copyClipboard100Btn");
 
 const commitBtn     = document.getElementById("commitBtn");
@@ -30,7 +30,7 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-// Photopea export button
+// Photopea export button (UNCHANGED)
 const exportToPPBtn  = document.getElementById("exportToPPBtn");
 
 // ---------- Logging ----------
@@ -38,8 +38,8 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1; // last successfully applied frame seq
-let currentLoadId  = 0;  // monotonically increasing load generation
+let lastSeqApplied = -1;
+let currentLoadId  = 0;
 
 // ---------- Boot ----------
 await initState();
@@ -110,7 +110,7 @@ filterSelect.addEventListener("change", () => {
   requestRender();
 });
 
-// View actions
+// View actions (UNCHANGED)
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
 exportBtn?.addEventListener("click", () => exportPNG());
 zoom100Btn?.addEventListener("click", () => setScale(1));
@@ -118,32 +118,29 @@ zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
 
-// New: copy visible canvas to clipboard at enforced 100%
+// NEW: Copy visible canvas to clipboard at enforced 100% (and keep 100% afterwards)
 copyClipboard100Btn?.addEventListener("click", async ()=>{
   if (!canvasEl || canvasEl.style.display === "none" || !state.image) {
     alert("Load an image first.");
     return;
   }
-  // UI feedback
   const btn = copyClipboard100Btn;
   const prevText = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Copying…";
-
   try {
-    // Force 100% zoom and render before grabbing pixels
+    // Force 100% zoom and re-render before grabbing pixels
     state.viewScale = 1;
     await forceNextPaint();
 
-    // Read pixels as PNG from the on-screen canvas
     const blob = await canvasToBlob(canvasEl, "image/png");
     await writeImageToClipboard(blob);
 
     btn.textContent = "Copied!";
-    // Leave zoom at 100% as requested (do not restore previous zoom)
+    // NOTE: we intentionally keep zoom at 100%
   } catch (err) {
     console.error(err);
-    // Fallback: offer a download if clipboard API is unavailable
+    // Fallback: download PNG if clipboard is unavailable
     try {
       const blob = await canvasToBlob(canvasEl, "image/png");
       const url = URL.createObjectURL(blob);
@@ -156,17 +153,17 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
       btn.textContent = prevText;
     }
   } finally {
-    setTimeout(()=>{ if (!btn.disabled) return; btn.disabled = false; btn.textContent = prevText; }, 900);
+    setTimeout(()=>{ btn.disabled = false; btn.textContent = prevText; }, 900);
   }
 });
 
-// Commit
+// Commit (UNCHANGED)
 commitBtn?.addEventListener("click", () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
   commitToSource(); fitToView(); requestRender();
 });
 
-// Defaults
+// Defaults (UNCHANGED)
 defaultsBtn?.addEventListener("click", () => {
   const f = state.currentFilter; if (!f) return;
   state.params[state.filterId] = defaultParamsFor(f);
@@ -177,7 +174,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// Presets
+// Presets (UNCHANGED)
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -205,7 +202,7 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-// Common loader
+// Common loader (UNCHANGED)
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -221,20 +218,18 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-// Debounced render
+// Debounced render (UNCHANGED)
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
 
-// Ensure next paint happens (await a full rAF cycle after scheduling a render)
+// Ensure next paint happens after enforcing 100%
 function forceNextPaint(){
   return new Promise(resolve=>{
-    // schedule render now
     requestRender();
-    // wait two rAF ticks to be safe (render may itself schedule)
     requestAnimationFrame(()=> requestAnimationFrame(resolve));
   });
 }
 
-// Canvas → Blob helper
+// Canvas → Blob
 function canvasToBlob(canvas, mime="image/png"){
   return new Promise((resolve, reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
@@ -255,10 +250,9 @@ async function writeImageToClipboard(blob){
   }
 }
 
-// ================== Photopea roundtrip integration ==================
+// ================== Photopea roundtrip integration (UNCHANGED) ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
-// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -269,7 +263,6 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
-// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -283,31 +276,21 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
-
-    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
-
-    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
-
     try{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
-
-      // Await decoding & drawing; if a newer load started, abort applying
       await loadFileToState(file);
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
-
-      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
-
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
@@ -318,7 +301,6 @@ window.addEventListener("message", async (ev)=>{
   }
 });
 
-// Export current output PNG to Photopea (new document)
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
@@ -331,7 +313,6 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
-// Helper: canvas → ArrayBuffer (for Photopea export)
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
