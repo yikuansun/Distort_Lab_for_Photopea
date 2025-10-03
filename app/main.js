@@ -48,7 +48,7 @@ await initCanvas();
 state.params = {};
 for (const f of registry) state.params[f.id] = defaultParamsFor(f);
 
-// Filter list
+// Populate filter list
 for (const f of registry) {
   const opt = document.createElement("option");
   opt.value = f.id;
@@ -59,7 +59,7 @@ state.currentFilter = registry[0];
 setFilterId(state.currentFilter.id);
 filterSelect.value = state.filterId;
 
-// Build UI
+// Build params UI
 buildParamsPanel(
   paramsPanel,
   state.currentFilter,
@@ -67,7 +67,7 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-// Loaders
+// ---------- Image loading ----------
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -95,7 +95,22 @@ window.addEventListener("paste", async (ev) => {
   if (file) await loadFileToState(file);
 });
 
-// Filter change
+async function loadFileToState(file){
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = async ()=>{
+    state.image = img;
+    placeholderEl.style.display = "none";
+    canvasEl.style.display = "";
+    await drawSource();
+    fitToView(); requestRender();
+    URL.revokeObjectURL(url);
+  };
+  img.crossOrigin = "anonymous";
+  img.src = url;
+}
+
+// ---------- Filter switching ----------
 filterSelect.addEventListener("change", () => {
   const id = filterSelect.value;
   state.currentFilter = registry.find(f => f.id === id);
@@ -109,20 +124,19 @@ filterSelect.addEventListener("change", () => {
   requestRender();
 });
 
-// View actions
+// ---------- View actions ----------
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
 zoom100Btn?.addEventListener("click", () => setScale(1));
 zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
 
-// Commit
+// ---------- Commit / Defaults ----------
 commitBtn?.addEventListener("click", () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
   commitToSource(); fitToView(); requestRender();
 });
 
-// Defaults
 defaultsBtn?.addEventListener("click", () => {
   const f = state.currentFilter; if (!f) return;
   state.params[state.filterId] = defaultParamsFor(f);
@@ -133,7 +147,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// Presets
+// ---------- Presets ----------
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -161,29 +175,12 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-// Common loader
-async function loadFileToState(file){
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = async ()=>{
-    state.image = img;
-    placeholderEl.style.display = "none";
-    canvasEl.style.display = "";
-    await drawSource();
-    fitToView(); requestRender();
-    URL.revokeObjectURL(url);
-  };
-  img.crossOrigin = "anonymous";
-  img.src = url;
-}
-
-// Debounced render
+// ---------- Render debounce ----------
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
 
 // ================== Photopea roundtrip integration ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
-// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -194,7 +191,6 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
-// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -209,13 +205,11 @@ window.addEventListener("message", async (ev)=>{
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
 
-    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
 
-    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
 
@@ -223,14 +217,12 @@ window.addEventListener("message", async (ev)=>{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
 
-      // Await decoding & drawing; if a newer load started, abort applying
       await loadFileToState(file);
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
 
-      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
 
       if (window.opener && !window.opener.closed) {
@@ -243,14 +235,13 @@ window.addEventListener("message", async (ev)=>{
   }
 });
 
-// Export current output PNG to Photopea (new document)
+// ---------- Export to Photopea (new document) ----------
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
     if (window.opener && !window.opener.closed) {
       window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
       LP("→ LAB_EXPORT", ab.byteLength, "bytes");
-      // Bring Photopea to front (user gesture context)
       try { window.opener.focus(); } catch {}
     } else {
       alert("Plugin window is not available. Please start from the Photopea plugin panel.");
@@ -258,26 +249,23 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
-// Copy to clipboard (original size) with fallback to Photopea export
+// ---------- Copy to Clipboard (original size) with fallback ----------
 copyBtn?.addEventListener("click", async ()=>{
-  if (!canvasEl) return;
+  if (!canvasEl || !state.image) return;
   try{
-    const blob = await canvasToBlob(canvasEl);
-    await navigator.clipboard.write([
-      new ClipboardItem({ "image/png": blob })
-    ]);
-    LL("Copied PNG to clipboard.");
+    const blob = await exportOriginalBlobFromVisibleCanvas();
+    await navigator.clipboard.write([ new ClipboardItem({ "image/png": blob }) ]);
+    LL("Copied PNG to clipboard (original size).");
   }catch(err){
     console.warn("Clipboard write failed, falling back to Photopea export.", err);
-    // Fallback: export to Photopea as new document
     try{
-      const ab = await canvasToArrayBuffer(canvasEl);
+      const ab = await exportOriginalArrayBufferFromVisibleCanvas();
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
         LP("→ LAB_EXPORT (fallback)", ab.byteLength, "bytes");
         try { window.opener.focus(); } catch {}
       } else {
-        // As a last resort, download the PNG
+        // Last resort: download
         const blob2 = new Blob([ab], { type: "image/png" });
         const url = URL.createObjectURL(blob2);
         const a = Object.assign(document.createElement("a"), { href:url, download:"distorted.png" });
@@ -287,7 +275,7 @@ copyBtn?.addEventListener("click", async ()=>{
   }
 });
 
-// Helpers
+// ---------- Helpers ----------
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
@@ -307,5 +295,56 @@ function canvasToBlob(canvas){
       if (!blob) return reject(new Error("toBlob() failed"));
       resolve(blob);
     }, "image/png");
+  });
+}
+
+/**
+ * Render the current filter output at original image resolution into the visible canvas,
+ * extract a PNG Blob, then restore the previous canvas size / zoom and repaint.
+ * This guarantees 1:1 pixels without changing the user's visible state.
+ */
+async function exportOriginalBlobFromVisibleCanvas(){
+  const { image } = state;
+  if (!image) throw new Error("No image loaded");
+
+  const naturalW = image.naturalWidth || image.width;
+  const naturalH = image.naturalHeight || image.height;
+
+  // Save current canvas state
+  const prevW = canvasEl.width;
+  const prevH = canvasEl.height;
+  const prevScale = state.viewScale;
+
+  // Switch to original resolution and scale 1:1 for a single paint
+  canvasEl.width = naturalW;
+  canvasEl.height = naturalH;
+  state.viewScale = 1;
+
+  // Ensure the pipeline paints at the new backing size
+  await nextRafPaint();
+  const blob = await canvasToBlob(canvasEl);
+
+  // Restore previous state and repaint
+  canvasEl.width = prevW;
+  canvasEl.height = prevH;
+  state.viewScale = prevScale;
+  await nextRafPaint();
+
+  return blob;
+}
+
+async function exportOriginalArrayBufferFromVisibleCanvas(){
+  const blob = await exportOriginalBlobFromVisibleCanvas();
+  const buf = await blob.arrayBuffer();
+  return buf;
+}
+
+// Wait for two RAFs to ensure render() completed a frame at the new size
+function nextRafPaint(){
+  return new Promise((res)=>{
+    requestAnimationFrame(()=>{
+      render();
+      requestAnimationFrame(()=>res());
+    });
   });
 }
