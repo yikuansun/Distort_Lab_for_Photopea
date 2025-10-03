@@ -32,30 +32,38 @@
   <script>
   (function(){
     // ---------------- Config ----------------
-    const LAB_URL = "https://pt-home.github.io/Distort_Lab_for_Photopea/";
+    const LAB_URL         = "https://pt-home.github.io/Distort_Lab_for_Photopea/";
     const PHOTOPEA_ORIGIN = "https://www.photopea.com";
-    const LAB_ORIGIN = "https://pt-home.github.io";
+    const LAB_ORIGIN      = "https://pt-home.github.io";
 
-    const READY_TIMEOUT_MS   = 1800;
-    const READY_RETRIES      = 2;
-    const APPLIED_TIMEOUT_MS = 1300;
-    const APPLIED_RETRIES    = 1;
+    const READY_TIMEOUT_MS    = 1800;
+    const READY_RETRIES       = 2;
+    const APPLIED_TIMEOUT_MS  = 1300;
+    const APPLIED_RETRIES     = 1;
+
+    // After pp:saveToOE, collect buffers for this long and pick the last one
+    const POST_SAVE_BUFFER_WINDOW_MS = 160;
 
     // ---------------- State ----------------
-    let sessionId = null;
-    let labWin = null;
-    let labIsReady = false;
+    let sessionId   = null;
+    let labWin      = null;
+    let labIsReady  = false;
 
-    let pendingPng = null;
+    // Current operation FSM (one send action)
+    let op = null; // { id, armed, sent, buffers[], windowTimer }
+
+    // Pending delivery to Lab (after we pick a buffer)
+    let pendingPng  = null;
     let pendingName = "from-photopea.png";
-    let pendingSeq = -1;
-    let seqCounter = 0;
+    let pendingSeq  = -1;
+    let seqCounter  = 0;
     let appliedTimer = null;
     let appliedTries = 0;
 
     const statusEl = document.getElementById("status");
     const sendBtn  = document.getElementById("sendBtn");
 
+    // --------------- Logging helpers ---------------
     const L  = (...a)=>console.log("[DL-PLUGIN]", ...a);
     const LP = (...a)=>console.log("%c[DL-PP]", "color:#9aa0a6", ...a);
     const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
@@ -88,24 +96,22 @@
       LL("→ LAB_OPEN", msg);
     }
 
-    // ---------------- Ask Photopea for active layer ----------------
-    function askPhotopeaForActiveLayer(){
-      // Unique name per operation to break any internal caches
-      const tmpName = "DL Temp " + Date.now();
-
-      // IMPORTANT: do not interpolate tmp.name here; compute it inside Photopea.
-      const script = `
+    // ---------------- Build PP script for this operation ----------------
+    function buildPhotopeaScript(opId){
+      const tmpName = "DL Temp " + Date.now(); // unique temp document name
+      // Inject opId into echoToOE markers so we can correlate logs if needed.
+      return `
       (function(){
         try{
-          app.echoToOE("pp:begin");
+          app.echoToOE("pp:op:${opId}:begin");
           var src = app.activeDocument;
-          if (!src){ app.echoToOE("pp:err:no-doc"); return; }
+          if (!src){ app.echoToOE("pp:op:${opId}:err:no-doc"); return; }
 
           var ly = src.activeLayer;
-          if (!ly){ app.echoToOE("pp:err:no-active-layer"); return; }
+          if (!ly){ app.echoToOE("pp:op:${opId}:err:no-active-layer"); return; }
 
-          try { ly.copy(); app.echoToOE("pp:copy:layer"); }
-          catch(e){ app.echoToOE("pp:err:copy:"+e); return; }
+          try { ly.copy(); app.echoToOE("pp:op:${opId}:copy"); }
+          catch(e){ app.echoToOE("pp:op:${opId}:err:copy:"+e); return; }
 
           var w = src.width  || 1024;
           var h = src.height || 1024;
@@ -114,32 +120,54 @@
           if (typeof mode !== "string") mode = "RGB";
 
           var tmp = app.documents.add(w, h, res, "${tmpName}", mode);
-          app.echoToOE("pp:new:"+w+"x"+h+"@"+res+" "+mode+" name="+tmp.name);
+          app.echoToOE("pp:op:${opId}:new:"+w+"x"+h+"@"+res+" "+mode+" name="+tmp.name);
 
-          try { tmp.paste(); app.echoToOE("pp:paste"); }
-          catch(e){ app.echoToOE("pp:err:paste:"+e); try{ tmp.close(); }catch(_){} return; }
+          try { tmp.paste(); app.echoToOE("pp:op:${opId}:paste"); }
+          catch(e){ app.echoToOE("pp:op:${opId}:err:paste:"+e); try{ tmp.close(); }catch(_){} return; }
 
-          try { tmp.trimTransparent(); app.echoToOE("pp:trim"); } catch(e){}
+          try { tmp.trimTransparent(); app.echoToOE("pp:op:${opId}:trim"); } catch(e){}
 
-          try { tmp.saveToOE("png"); app.echoToOE("pp:saveToOE"); }
-          catch(e){ app.echoToOE("pp:err:saveToOE:"+e); }
+          try { tmp.saveToOE("png"); app.echoToOE("pp:op:${opId}:saveToOE"); }
+          catch(e){ app.echoToOE("pp:op:${opId}:err:saveToOE:"+e); }
 
-          try { tmp.close(); app.echoToOE("pp:close"); } catch(e){ app.echoToOE("pp:err:close:"+e); }
+          try { tmp.close(); app.echoToOE("pp:op:${opId}:close"); } catch(e){ app.echoToOE("pp:op:${opId}:err:close:"+e); }
 
           try { app.activeDocument = src; } catch(e){}
-          app.echoToOE("pp:done");
+          app.echoToOE("pp:op:${opId}:done");
         }catch(err){
-          app.echoToOE("pp:err:outer:"+err);
+          app.echoToOE("pp:op:${opId}:err:outer:"+err);
         }
       })();
       `;
-
-      window.parent.postMessage(script, PHOTOPEA_ORIGIN);
-      setStatus("Requesting active layer from Photopea…");
-      L("Requested active layer (copy→new→paste→OE). tempName=", tmpName);
     }
 
-    // ---------------- Send to Lab / wait for APPLIED ----------------
+    // ---------------- Orchestrate one send operation ----------------
+    function startOperation(){
+      // Cancel previous op (if any)
+      if (op && op.windowTimer) { clearTimeout(op.windowTimer); }
+      op = { id: ("op-"+Date.now()+"-"+Math.random().toString(36).slice(2)), armed:false, sent:false, buffers:[], windowTimer:null };
+
+      // Ask Photopea to produce a fresh PNG for this op
+      const script = buildPhotopeaScript(op.id);
+      window.parent.postMessage(script, PHOTOPEA_ORIGIN);
+      setStatus("Requesting active layer from Photopea…");
+      L("Requested active layer (copy→new→paste→OE). opId=", op.id);
+    }
+
+    // ---------------- Delivery to Lab ----------------
+    function pickAndSendBufferForCurrentOp(){
+      if (!op || op.sent) return;
+      const last = op.buffers.length ? op.buffers[op.buffers.length - 1] : null;
+      if (!last) {
+        L("No buffers collected in window after saveToOE (opId=", op.id, ")");
+        return;
+      }
+      pendingPng  = last;
+      pendingName = "from-photopea.png";
+      sendImageToLab();
+      op.sent = true;
+    }
+
     function sendImageToLab(){
       if (!labWin || labWin.closed) { setStatus("Lab tab is not available."); return; }
       if (!pendingPng) { setStatus("No image to send."); return; }
@@ -188,7 +216,7 @@
       ensureSession();
       openOrFocusLab();
       sendLAB_OPEN();
-      askPhotopeaForActiveLayer();
+      startOperation();
     });
 
     window.addEventListener("message", (ev)=>{
@@ -197,15 +225,38 @@
         if (ev.data === "done") return;
 
         if (ev.data instanceof ArrayBuffer) {
-          pendingPng = ev.data;
-          LP("Photopea → plugin: ArrayBuffer", pendingPng.byteLength, "bytes");
-          setStatus("Image received from Photopea.");
-          waitForLabReadyThenSend();
+          // Buffer from OE
+          if (op && op.armed && !op.sent) {
+            op.buffers.push(ev.data);
+            LP("Photopea → plugin: ArrayBuffer (armed)", ev.data.byteLength, "bytes", "opId=", op.id, "count=", op.buffers.length);
+            // Wait for window to close, then pick last
+          } else {
+            LP("Photopea → plugin: ArrayBuffer (ignored pre-save)");
+          }
           return;
         }
+
         if (typeof ev.data === "string") {
-          LP("Photopea:", ev.data);
-          setStatus("Photopea: " + ev.data);
+          // String diagnostics from our PP script
+          const s = ev.data;
+          LP("Photopea:", s);
+
+          // Arm only when saveToOE of our current op happens
+          if (op && s.indexOf("pp:op:"+op.id+":saveToOE") === 0) {
+            op.armed = true;
+            if (op.windowTimer) clearTimeout(op.windowTimer);
+            op.windowTimer = setTimeout(()=>{
+              pickAndSendBufferForCurrentOp();
+              op.windowTimer = null;
+            }, POST_SAVE_BUFFER_WINDOW_MS);
+            setStatus("Waiting for image buffer after save…");
+          }
+
+          // Optional status updates (not required for logic)
+          if (s.indexOf("pp:op:") === 0 && s.endsWith(":done")) {
+            // We'll still rely on the buffer window, not on :done event.
+            // No action needed.
+          }
           return;
         }
       }
