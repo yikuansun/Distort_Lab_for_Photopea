@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <title>Distort Lab</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- App styles -->
   <link rel="stylesheet" href="./styles.css" />
   <link rel="icon" href="./dl.svg" type="image/svg+xml" />
 </head>
@@ -15,17 +14,14 @@
       <div class="sub">Interactive conformal & geometric image distortions</div>
     </div>
 
+    <!-- only ADD this button; keep Commit as-is -->
     <div class="head-actions">
-      <!-- New button -->
       <button id="copyClipboard100Btn" class="ghost">Copy to Clipboard (100%)</button>
-
-      <!-- Existing action (commit to make current result the new source) -->
       <button id="commitBtn" class="ghost">Commit Changes</button>
     </div>
   </header>
 
   <div class="layout">
-    <!-- Sidebar -->
     <aside class="sidebar">
       <div class="block">
         <label>Load Image</label>
@@ -53,6 +49,7 @@
       <div class="block">
         <label>Export</label>
         <button id="exportBtn">Export PNG</button>
+        <!-- KEEP THIS EXACT BUTTON: export to Photopea new document -->
         <button id="exportToPPBtn" class="secondary">Export PNG to Photopea (new document)</button>
       </div>
 
@@ -65,14 +62,12 @@
       </div>
     </aside>
 
-    <!-- Stage -->
     <main class="stage" id="stage">
       <div id="stagePlaceholder">Drop or Paste an image, or click “Open…”</div>
       <canvas id="view" width="0" height="0" style="display:none"></canvas>
     </main>
   </div>
 
-  <!-- App scripts -->
   <script type="module" src="./app/main.js"></script>
 </body>
 </html>
