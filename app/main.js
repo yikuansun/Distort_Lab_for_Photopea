@@ -18,7 +18,7 @@ const zoomOutBtn    = document.getElementById("zoomOutBtn");
 const zoomInBtn     = document.getElementById("zoomInBtn");
 const zoom100Btn    = document.getElementById("zoom100Btn");
 
-// New: header button to copy canvas at enforced 100% (keeps 100% afterwards)
+// Header: copy to clipboard at 100%
 const copyClipboard100Btn = document.getElementById("copyClipboard100Btn");
 
 const commitBtn     = document.getElementById("commitBtn");
@@ -30,7 +30,7 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-// Photopea export button (unchanged)
+// Photopea export button
 const exportToPPBtn  = document.getElementById("exportToPPBtn");
 
 // ---------- Logging ----------
@@ -38,8 +38,8 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1;
-let currentLoadId  = 0;
+let lastSeqApplied = -1; // last confirmed seq that was actually rendered
+let currentLoadId  = 0;  // monotonic load generation id
 
 // ---------- Boot ----------
 await initState();
@@ -68,7 +68,7 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-// Loaders
+// ---------- Loaders ----------
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -96,7 +96,7 @@ window.addEventListener("paste", async (ev) => {
   if (file) await loadFileToState(file);
 });
 
-// Filter change
+// ---------- Filter change ----------
 filterSelect.addEventListener("change", () => {
   const id = filterSelect.value;
   state.currentFilter = registry.find(f => f.id === id);
@@ -110,7 +110,7 @@ filterSelect.addEventListener("change", () => {
   requestRender();
 });
 
-// View actions (unchanged)
+// ---------- View actions ----------
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
 exportBtn?.addEventListener("click", () => exportPNG());
 zoom100Btn?.addEventListener("click", () => setScale(1));
@@ -118,7 +118,7 @@ zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
 
-// NEW: Copy visible canvas to clipboard at enforced 100% (and keep 100% afterwards)
+// ---------- Copy @100% ----------
 copyClipboard100Btn?.addEventListener("click", async ()=>{
   if (!canvasEl || canvasEl.style.display === "none" || !state.image) {
     alert("Load an image first.");
@@ -129,15 +129,11 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
   btn.disabled = true;
   btn.textContent = "Copying…";
   try {
-    // Force 100% zoom and re-render before grabbing pixels
     state.viewScale = 1;
-    await forceNextPaint();
-
+    await nextPaint(); // schedule & wait a paint at 100%
     const blob = await canvasToBlob(canvasEl, "image/png");
     await writeImageToClipboard(blob);
-
     btn.textContent = "Copied!";
-    // NOTE: we intentionally keep zoom at 100%
   } catch (err) {
     console.error(err);
     // Fallback: download PNG if clipboard is unavailable
@@ -157,7 +153,7 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
   }
 });
 
-// Commit: await the commit to reliably enable repeated commits
+// ---------- Commit ----------
 commitBtn?.addEventListener("click", async () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
   commitBtn.disabled = true;
@@ -170,7 +166,7 @@ commitBtn?.addEventListener("click", async () => {
   }
 });
 
-// Defaults (unchanged)
+// ---------- Defaults ----------
 defaultsBtn?.addEventListener("click", () => {
   const f = state.currentFilter; if (!f) return;
   state.params[state.filterId] = defaultParamsFor(f);
@@ -181,58 +177,56 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// Presets (unchanged)
-savePresetBtn?.addEventListener("click", () => {
-  const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
-  const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
-  const url  = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement("a"), { href:url, download: `${payload.name || payload.filter}-preset.json` });
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-});
-loadPresetBtn?.addEventListener("click", ()=> loadPresetFile?.click());
-loadPresetFile?.addEventListener("change", async (e)=>{
-  const file = e.target.files?.[0]; if (!file) return;
-  try{
-    const data = JSON.parse(await file.text());
-    if (data?.type !== "distort-lab-preset") throw new Error("Invalid preset");
-    if (data.filter && data.filter !== state.filterId){
-      const found = registry.find(f => f.id === data.filter);
-      if (!found) throw new Error(`Filter "${data.filter}" not found`);
-      state.currentFilter = found; setFilterId(found.id); filterSelect.value = found.id;
-    }
-    const base = defaultParamsFor(state.currentFilter);
-    state.params[state.filterId] = { ...base, ...(data.params||{}) };
-    if (typeof data.name === "string" && presetNameEl) presetNameEl.value = data.name;
-    buildParamsPanel(paramsPanel, state.currentFilter, state.params[state.filterId], (k,v)=>{ setParam(state.filterId,k,v); requestRender(); });
-    requestRender();
-  }catch(err){ alert("Failed to load preset."); console.error(err); }
-  finally{ e.target.value=""; }
-});
-
-// Common loader (unchanged)
+// ---------- Common loader (NOW truly awaiting onload + paint) ----------
 async function loadFileToState(file){
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = async ()=>{
-    state.image = img;
-    placeholderEl.style.display = "none";
-    canvasEl.style.display = "";
-    await drawSource();
-    fitToView(); requestRender();
-    URL.revokeObjectURL(url);
-  };
-  img.crossOrigin = "anonymous";
-  img.src = url;
+  return new Promise((resolve, reject)=>{
+    try{
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = async ()=>{
+        try{
+          state.image = img;
+
+          // Show canvas, hide placeholder
+          if (placeholderEl) placeholderEl.style.display = "none";
+          if (canvasEl) canvasEl.style.display = "";
+
+          await drawSource();    // sets canvas size to source size and clears
+          fitToView();           // compute viewScale for stage
+          requestRender();       // schedule render with new source
+          await nextPaint();     // wait one paint to ensure pixels show
+
+          URL.revokeObjectURL(url);
+          resolve();
+        }catch(e){
+          URL.revokeObjectURL(url);
+          reject(e);
+        }
+      };
+      img.onerror = ()=>{
+        URL.revokeObjectURL(url);
+        reject(new Error("Image failed to load"));
+      };
+      img.src = url;
+    }catch(err){
+      reject(err);
+    }
+  });
 }
 
-// Debounced render (unchanged)
-let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
+// ---------- Debounced render ----------
+let raf=0;
+function requestRender(){
+  if (raf) cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(()=>render());
+}
 
-// Ensure next paint happens after enforcing 100%
-function forceNextPaint(){
-  return new Promise(resolve=>{
+// Wait for the next rendered frame (double rAF for safety)
+function nextPaint(){
+  return new Promise(res=>{
     requestRender();
-    requestAnimationFrame(()=> requestAnimationFrame(resolve));
+    requestAnimationFrame(()=> requestAnimationFrame(res));
   });
 }
 
@@ -257,7 +251,7 @@ async function writeImageToClipboard(blob){
   }
 }
 
-// ================== Photopea roundtrip integration (unchanged) ==================
+// ================== Photopea roundtrip integration ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
 function announceReady(){
@@ -270,6 +264,7 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
+// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -283,21 +278,34 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
+
+    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
+
+    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
+
     try{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
+
+      // Await full decode + draw + first paint
       await loadFileToState(file);
+
+      // If a newer load started while we were decoding, abort confirming
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
+
+      // Mark this seq as applied only AFTER we actually painted a frame
       lastSeqApplied = seq;
+
+      // Now confirm to plugin
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
