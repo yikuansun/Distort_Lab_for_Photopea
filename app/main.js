@@ -4,7 +4,6 @@ import { render } from "./engine.js";
 import { registry, defaultParamsFor } from "./filters.js";
 import { buildParamsPanel } from "./ui.js";
 
-// ---------- DOM ----------
 const loadBtn       = document.getElementById("loadBtn");
 const filterSelect  = document.getElementById("filterSelect");
 const paramsPanel   = document.getElementById("paramsPanel");
@@ -23,31 +22,23 @@ const zoom100Btn    = document.getElementById("zoom100Btn");
 const commitBtn     = document.getElementById("commitBtn");
 const defaultsBtn   = document.getElementById("defaultsBtn");
 
-// Presets
 const presetNameEl   = document.getElementById("presetName");
 const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-// ---------- Logging ----------
 const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
-// ---------- Anti-race state ----------
 let lastSeqApplied = -1;
 let currentLoadId  = 0;
 
-let exportSeq = 0;
-
-// ---------- Boot ----------
 await initState();
 await initCanvas();
 
-// Init params
 state.params = {};
 for (const f of registry) state.params[f.id] = defaultParamsFor(f);
 
-// Populate filter list
 for (const f of registry) {
   const opt = document.createElement("option");
   opt.value = f.id;
@@ -58,7 +49,6 @@ state.currentFilter = registry[0];
 setFilterId(state.currentFilter.id);
 filterSelect.value = state.filterId;
 
-// Build params UI
 buildParamsPanel(
   paramsPanel,
   state.currentFilter,
@@ -66,7 +56,6 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-// ---------- Image loading (manual / drag / paste) ----------
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -101,7 +90,7 @@ async function loadFileToState(file){
     state.image = img;
     placeholderEl.style.display = "none";
     canvasEl.style.display = "";
-    await drawSource();              // <<< ensure pipeline has the source
+    await drawSource();
     fitToView(); requestRender();
     URL.revokeObjectURL(url);
   };
@@ -109,7 +98,6 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-// ---------- Filter switching ----------
 filterSelect.addEventListener("change", () => {
   const id = filterSelect.value;
   state.currentFilter = registry.find(f => f.id === id);
@@ -123,14 +111,12 @@ filterSelect.addEventListener("change", () => {
   requestRender();
 });
 
-// ---------- View actions ----------
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
 zoom100Btn?.addEventListener("click", () => setScale(1));
 zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
 function setScale(s){ state.viewScale = Math.max(0.05, Math.min(8, s||1)); requestRender(); }
 
-// ---------- Commit / Defaults ----------
 commitBtn?.addEventListener("click", () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
   commitToSource(); fitToView(); requestRender();
@@ -146,7 +132,6 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// ---------- Presets ----------
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -174,12 +159,10 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-// ---------- Render debounce ----------
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
 
-// ================== Photopea roundtrip integration ==================
+// ===== Photopea integration =====
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
-
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -190,7 +173,6 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
-// CRC32 (debug)
 function crc32_ab(ab){
   let crc = 0 ^ (-1);
   const view = new Uint8Array(ab);
@@ -216,16 +198,13 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
-    if (seq <= lastSeqApplied) {
-      LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
-      return;
-    }
-    const loadId = ++currentLoadId;
+    if (seq <= lastSeqApplied) { LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied); return; }
 
+    const loadId = ++currentLoadId;
     const crcHere = crc32_ab(msg.buffer);
     LL(`← LAB_IMAGE seq=${seq}, bytes=${msg.buffer.byteLength}, loadId=${loadId}, crc=${crcHere}` + (msg.crc ? ` (plugin=${msg.crc})` : ""));
 
-    // Hard reset
+    // Hard reset before new image
     try {
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
@@ -236,45 +215,37 @@ window.addEventListener("message", async (ev)=>{
     } catch(e) { console.warn("Reset failed:", e); }
 
     try{
+      // Decode exactly як при локальному Open: через <img> і ObjectURL
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
-      const bitmap = await createImageBitmap(blob);
-      const w = bitmap.width, h = bitmap.height;
+      const url  = URL.createObjectURL(blob);
 
-      canvasEl.width = w; canvasEl.height = h;
-      const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(bitmap, 0, 0);
-
-      placeholderEl.style.display = "none";
-      canvasEl.style.display = "";
-
-      await nextRafPaint();
-      LL("painted seq="+seq+` at ${w}x${h}`);
-
-      // Snapshot → state.image
-      const snapBlob = await canvasToBlob(canvasEl);
-      const snapUrl  = URL.createObjectURL(snapBlob);
       await new Promise((res)=>{
         const img = new Image();
-        img.onload = ()=>{ state.image = img; URL.revokeObjectURL(snapUrl); res(); };
-        img.src = snapUrl;
+        img.onload = async ()=>{
+          URL.revokeObjectURL(url);
+          state.image = img;
+
+          placeholderEl.style.display = "none";
+          canvasEl.style.display = "";
+
+          await drawSource();              // готуємо пайплайн
+          if (loadId !== currentLoadId) {  // захист від змагань
+            LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
+            return res();
+          }
+          fitToView();
+          requestRender();
+
+          lastSeqApplied = seq;
+          if (window.opener && !window.opener.closed) {
+            window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
+            LL("→ LAB_IMAGE_APPLIED seq="+seq);
+          }
+          res();
+        };
+        img.crossOrigin = "anonymous";
+        img.src = url;
       });
-
-      // >>> FIX: prepare pipeline source
-      await drawSource();
-
-      if (loadId !== currentLoadId) {
-        LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
-        return;
-      }
-
-      fitToView();
-      requestRender();
-
-      lastSeqApplied = seq;
-      if (window.opener && !window.opener.closed) {
-        window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
-        LL("→ LAB_IMAGE_APPLIED seq="+seq);
-      }
     }catch(e){
       console.error("Failed to load image from plugin:", e);
     }
@@ -295,7 +266,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error("Failed to export PNG to Photopea."); alert("Failed to export PNG to Photopea."); }
 });
 
-// ---------- Copy to Clipboard (original size) ----------
+// ---------- Copy original size ----------
 copyBtn?.addEventListener("click", async ()=>{
   if (!canvasEl || !state.image) return;
   try{
@@ -320,7 +291,6 @@ copyBtn?.addEventListener("click", async ()=>{
   }
 });
 
-// ---------- Helpers ----------
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
@@ -342,23 +312,17 @@ function canvasToBlob(canvas){
     }, "image/png");
   });
 }
-
 async function exportOriginalBlobFromVisibleCanvas(){
   const { image } = state;
   if (!image) throw new Error("No image loaded");
-
   const naturalW = image.naturalWidth || image.width;
   const naturalH = image.naturalHeight || image.height;
-
   const prevW = canvasEl.width, prevH = canvasEl.height, prevScale = state.viewScale;
-
   canvasEl.width = naturalW; canvasEl.height = naturalH; state.viewScale = 1;
   await nextRafPaint();
   const blob = await canvasToBlob(canvasEl);
-
   canvasEl.width = prevW; canvasEl.height = prevH; state.viewScale = prevScale;
   await nextRafPaint();
-
   return blob;
 }
 async function exportOriginalArrayBufferFromVisibleCanvas(){
