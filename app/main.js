@@ -219,22 +219,17 @@ window.addEventListener("message", async (ev)=>{
 
     // ---- HARD RESET before loading the new image (simple & reliable) ----
     try {
-      // 1) Cancel any pending render frame
-      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (raf) { cancelAnimationFrame(raf); raf = 0; } // cancel pending repaint
 
-      // 2) Clear the visible canvas (wipe pixels and backing store)
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
       if (ctx) { ctx.clearRect(0, 0, canvasEl.width, canvasEl.height); }
       canvasEl.width = 0;
       canvasEl.height = 0;
 
-      // 3) Show placeholder and hide canvas until the new frame is ready
       placeholderEl.style.display = "";
       canvasEl.style.display = "none";
 
-      // 4) Drop previous image reference so nothing reuses it by accident
       state.image = null;
-
       LL("clear-before-load: canvas reset; placeholder shown");
     } catch (e) {
       console.warn("Failed to reset canvas before new load:", e);
@@ -246,13 +241,19 @@ window.addEventListener("message", async (ev)=>{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
 
+      // Load file → decode image → draw → fit
       await loadFileToState(file);
+
+      // Ensure one paint frame has happened
+      await nextRafPaint();
+      LL("painted seq="+seq);
+
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
 
-      // Confirm only for the currently applied newest seq
+      // Mark applied only AFTER the image is visible
       lastSeqApplied = seq;
 
       if (window.opener && !window.opener.closed) {
