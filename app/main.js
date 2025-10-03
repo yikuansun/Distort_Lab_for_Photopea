@@ -9,7 +9,9 @@ const loadBtn       = document.getElementById("loadBtn");
 const filterSelect  = document.getElementById("filterSelect");
 const paramsPanel   = document.getElementById("paramsPanel");
 const fitBtn        = document.getElementById("fitBtn");
-const exportBtn     = document.getElementById("exportBtn");
+const exportToPPBtn = document.getElementById("exportToPPBtn");
+const copyBtn       = document.getElementById("copyBtn");
+
 const stageEl       = document.getElementById("stage");
 const placeholderEl = document.getElementById("stagePlaceholder");
 const canvasEl      = document.getElementById("view");
@@ -27,9 +29,6 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-// Photopea export button
-const exportToPPBtn  = document.getElementById("exportToPPBtn");
-
 // ---------- Logging ----------
 const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
@@ -37,6 +36,9 @@ const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 // ---------- Anti-race state ----------
 let lastSeqApplied = -1; // last successfully applied frame seq
 let currentLoadId  = 0;  // monotonically increasing load generation
+
+// For unique export names (if needed elsewhere)
+let exportSeq = 0;
 
 // ---------- Boot ----------
 await initState();
@@ -109,7 +111,6 @@ filterSelect.addEventListener("change", () => {
 
 // View actions
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
-exportBtn?.addEventListener("click", () => exportPNG());
 zoom100Btn?.addEventListener("click", () => setScale(1));
 zoomInBtn?.addEventListener("click", () => setScale(state.viewScale * 1.1));
 zoomOutBtn?.addEventListener("click", () => setScale(state.viewScale / 1.1));
@@ -249,13 +250,44 @@ exportToPPBtn?.addEventListener("click", async ()=>{
     if (window.opener && !window.opener.closed) {
       window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
       LP("→ LAB_EXPORT", ab.byteLength, "bytes");
+      // Bring Photopea to front (user gesture context)
+      try { window.opener.focus(); } catch {}
     } else {
       alert("Plugin window is not available. Please start from the Photopea plugin panel.");
     }
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
-// Helper: canvas → ArrayBuffer
+// Copy to clipboard (original size) with fallback to Photopea export
+copyBtn?.addEventListener("click", async ()=>{
+  if (!canvasEl) return;
+  try{
+    const blob = await canvasToBlob(canvasEl);
+    await navigator.clipboard.write([
+      new ClipboardItem({ "image/png": blob })
+    ]);
+    LL("Copied PNG to clipboard.");
+  }catch(err){
+    console.warn("Clipboard write failed, falling back to Photopea export.", err);
+    // Fallback: export to Photopea as new document
+    try{
+      const ab = await canvasToArrayBuffer(canvasEl);
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({ type:"LAB_EXPORT", sessionId, mime:"image/png", name:"distorted.png", buffer: ab }, "https://pt-home.github.io", [ab]);
+        LP("→ LAB_EXPORT (fallback)", ab.byteLength, "bytes");
+        try { window.opener.focus(); } catch {}
+      } else {
+        // As a last resort, download the PNG
+        const blob2 = new Blob([ab], { type: "image/png" });
+        const url = URL.createObjectURL(blob2);
+        const a = Object.assign(document.createElement("a"), { href:url, download:"distorted.png" });
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      }
+    }catch(e){ console.error("Fallback export failed.", e); }
+  }
+});
+
+// Helpers
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
@@ -265,6 +297,15 @@ function canvasToArrayBuffer(canvas){
       fr.onload = ()=> resolve(fr.result);
       fr.onerror = reject;
       fr.readAsArrayBuffer(blob);
+    }, "image/png");
+  });
+}
+function canvasToBlob(canvas){
+  return new Promise((resolve,reject)=>{
+    if (!canvas) return reject(new Error("No canvas"));
+    canvas.toBlob((blob)=>{
+      if (!blob) return reject(new Error("toBlob() failed"));
+      resolve(blob);
     }, "image/png");
   });
 }
