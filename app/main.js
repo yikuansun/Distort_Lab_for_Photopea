@@ -181,6 +181,7 @@ let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=req
 // ================== Photopea roundtrip integration ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
+// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -191,6 +192,7 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
+// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -205,15 +207,42 @@ window.addEventListener("message", async (ev)=>{
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
 
+    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
 
+    // Begin a new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
 
+    // ---- HARD RESET before loading the new image (simple & reliable) ----
+    try {
+      // 1) Cancel any pending render frame
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+
+      // 2) Clear the visible canvas (wipe pixels and backing store)
+      const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
+      if (ctx) { ctx.clearRect(0, 0, canvasEl.width, canvasEl.height); }
+      canvasEl.width = 0;
+      canvasEl.height = 0;
+
+      // 3) Show placeholder and hide canvas until the new frame is ready
+      placeholderEl.style.display = "";
+      canvasEl.style.display = "none";
+
+      // 4) Drop previous image reference so nothing reuses it by accident
+      state.image = null;
+
+      LL("clear-before-load: canvas reset; placeholder shown");
+    } catch (e) {
+      console.warn("Failed to reset canvas before new load:", e);
+    }
+    // --------------------------------------------------------------------
+
     try{
+      // Convert incoming ArrayBuffer to a File and load it
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
 
@@ -223,6 +252,7 @@ window.addEventListener("message", async (ev)=>{
         return;
       }
 
+      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
 
       if (window.opener && !window.opener.closed) {
@@ -246,7 +276,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
     } else {
       alert("Plugin window is not available. Please start from the Photopea plugin panel.");
     }
-  }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
+  }catch(e){ console.error("Failed to export PNG to Photopea."); alert("Failed to export PNG to Photopea."); }
 });
 
 // ---------- Copy to Clipboard (original size) with fallback ----------
