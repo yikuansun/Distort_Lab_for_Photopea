@@ -1,21 +1,25 @@
+// engine.js
+// Distortion pipeline: read from offscreen srcCanvas, write to visible #view.
+
 import { state } from "./state.js";
 import { getSampler, bilinearSample, edgeResolve } from "./utils.js";
 
 let srcData = null;
 let srcW = 0, srcH = 0;
+let lastSourceVersion = -1;
 
 export function render() {
-  const { image, canvas, ctx, srcCanvas, srcCtx, currentFilter, params, viewScale } = state;
+  const { canvas, ctx, srcCanvas, srcCtx, currentFilter, params, viewScale } = state;
 
-  // Must have a filter and some source pixels either from an Image (drawn to srcCanvas)
-  // or already present in srcCanvas (after Commit).
+  // Must have an offscreen source
   const hasSrc = srcCanvas && srcCanvas.width > 0 && srcCanvas.height > 0;
   if (!currentFilter || !hasSrc) return;
 
-  // Refresh source pixels if size changed or first run
-  if (!srcData || srcW !== srcCanvas.width || srcH !== srcCanvas.height) {
+  // Refresh source pixels if size changed or sourceVersion bumped (commit / new load)
+  if (!srcData || srcW !== srcCanvas.width || srcH !== srcCanvas.height || lastSourceVersion !== (state.sourceVersion || 0)) {
     srcW = srcCanvas.width;
     srcH = srcCanvas.height;
+    lastSourceVersion = state.sourceVersion || 0;
     srcData = srcCtx.getImageData(0, 0, srcW, srcH);
   }
 
@@ -44,7 +48,7 @@ export function render() {
   const edgeMode = p.edgeMode || "clamp";
   const sampler = getSampler(edgeMode, srcW, srcH, srcBuf);
 
-  // Main loop in OUTPUT (view) pixels, transform to source space for mapping
+  // Main loop in OUTPUT (view) pixels → map back to source
   let i = 0;
   for (let y = 0; y < outH; y++) {
     const yS = y / scale;
@@ -66,5 +70,5 @@ export function render() {
     }
   }
 
-  state.ctx.putImageData(dst, 0, 0);
+  ctx.putImageData(dst, 0, 0);
 }
