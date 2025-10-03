@@ -4,11 +4,12 @@ import { render } from "./engine.js";
 import { registry, defaultParamsFor } from "./filters.js";
 import { buildParamsPanel } from "./ui.js";
 
-/* ===== DOM ===== */
+/* ---------- DOM ---------- */
 const loadBtn       = document.getElementById("loadBtn");
 const filterSelect  = document.getElementById("filterSelect");
 const paramsPanel   = document.getElementById("paramsPanel");
 const fitBtn        = document.getElementById("fitBtn");
+
 const exportToPPBtn = document.getElementById("exportToPPBtn");
 const copyBtn       = document.getElementById("copyBtn");
 
@@ -29,11 +30,11 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-/* ===== Logs ===== */
+/* ---------- Logging ---------- */
 const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
-/* ===== RAF helpers ===== */
+/* ---------- RAF helpers ---------- */
 let rafHandle = 0;
 function requestRender(){ 
   if (rafHandle) cancelAnimationFrame(rafHandle);
@@ -52,7 +53,19 @@ function nextRafPaint(){
   });
 }
 
-/* ===== Boot ===== */
+/* ---------- Blit helper: гарантований перший кадр ---------- */
+function blitFromSource(){
+  if (!state.sourceCanvas) return;
+  const src = state.sourceCanvas;
+  const view = canvasEl;
+  view.width  = src.width;
+  view.height = src.height;
+  const vctx = view.getContext("2d", { willReadFrequently: true });
+  vctx.clearRect(0,0,view.width,view.height);
+  vctx.drawImage(src, 0, 0);
+}
+
+/* ---------- Boot ---------- */
 await initState();
 await initCanvas();
 
@@ -76,7 +89,7 @@ buildParamsPanel(
   (key, val) => { setParam(state.filterId, key, val); requestRender(); }
 );
 
-/* ===== Local open / dnd / paste ===== */
+/* ---------- Local open / dnd / paste ---------- */
 let imageChooser = document.createElement("input");
 imageChooser.type = "file";
 imageChooser.accept = "image/*";
@@ -109,9 +122,16 @@ async function loadFileToState(file){
   const img = new Image();
   img.onload = async ()=>{
     state.image = img;
+
+    // Build pipeline source
+    await drawSource(true);
+    // First visible paint
+    blitFromSource();
+
+    // Show canvas
     placeholderEl.style.display = "none";
     canvasEl.style.display = "";
-    await drawSource(true);
+
     fitToView();
     await nextRafPaint();
     requestRender();
@@ -121,7 +141,7 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-/* ===== Filters ===== */
+/* ---------- Filters ---------- */
 filterSelect.addEventListener("change", () => {
   const id = filterSelect.value;
   state.currentFilter = registry.find(f => f.id === id);
@@ -156,7 +176,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-/* ===== Presets ===== */
+/* ---------- Presets ---------- */
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -184,7 +204,8 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-/* ===== Photopea integration ===== */
+/* ================== Photopea roundtrip ================== */
+
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
 function announceReady(){
@@ -235,51 +256,49 @@ window.addEventListener("message", async (ev)=>{
     LL(`← LAB_IMAGE seq=${seq}, bytes=${msg.buffer.byteLength}, loadId=${loadId}, crc=${crcHere}` + (msg.crc ? ` (plugin=${msg.crc})` : ""));
 
     try {
-      /* 1) Hard reset щоб не було ghost-кадрів */
+      // 1) full reset
       cancelAllRafs();
       const ctx = canvasEl.getContext("2d", { willReadFrequently: true });
       if (ctx) ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
       canvasEl.width = 0; canvasEl.height = 0;
       placeholderEl.style.display = "";
       canvasEl.style.display = "none";
-
       state.image = null;
       state.sourceCommitted = null;
       state.sourceCanvas = null;
       state.sourceCtx = null;
 
-      /* 2) Декодуємо без <img>: createImageBitmap → напряму у sourceCanvas */
+      // 2) decode → sourceCanvas (без <img>.onload)
       const blob   = new Blob([msg.buffer], { type: msg.mime || "image/png" });
-      const bitmap = await createImageBitmap(blob); // <— ключова зміна, без onload
+      const bitmap = await createImageBitmap(blob);
 
-      if (loadId !== currentLoadId) { LL("skip (superseded) before build source"); return; }
+      if (loadId !== currentLoadId) { LL("skip (superseded)"); return; }
 
-      const w = bitmap.width, h = bitmap.height;
       state.sourceCanvas = document.createElement("canvas");
-      state.sourceCanvas.width = w;
-      state.sourceCanvas.height = h;
+      state.sourceCanvas.width  = bitmap.width;
+      state.sourceCanvas.height = bitmap.height;
       state.sourceCtx = state.sourceCanvas.getContext("2d", { willReadFrequently: true });
       state.sourceCtx.drawImage(bitmap, 0, 0);
       state.sourceVersion = (state.sourceVersion || 0) + 1;
 
-      // Для сумісності з кодом, який очікує state.image, створимо швидкий snapshot
+      // Для експорту «оригінальний розмір» зручно мати image-обʼєкт
       state.image = new Image();
       state.image.src = state.sourceCanvas.toDataURL("image/png");
 
-      LL(`built source ${w}x${h} sourceVersion=${state.sourceVersion}`);
+      LL(`built source ${bitmap.width}x${bitmap.height} sourceVersion=${state.sourceVersion}`);
 
-      /* 3) Показуємо сцену, підганяємо вид та робимо один реальний рендер */
+      // 3) перший кадр у видиму канву — ГАРАНТОВАНО
+      blitFromSource();
+
+      // 4) показуємо сцену і робимо звичний цикл
       placeholderEl.style.display = "none";
       canvasEl.style.display = "";
 
       fitToView();
       await nextRafPaint();
-
-      if (loadId !== currentLoadId) { LL("skip (superseded) after paint"); return; }
-
       requestRender();
 
-      /* 4) Тепер безпечно ACK */
+      // 5) ACK тільки зараз
       lastSeqApplied = seq;
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
@@ -287,12 +306,11 @@ window.addEventListener("message", async (ev)=>{
       }
     } catch (e) {
       console.error("Failed to apply LAB_IMAGE:", e);
-      // (опційно) можна послати LAB_IMAGE_ERROR, якщо додамо обробку у плагіні
     }
   }
 });
 
-/* ===== Export to Photopea ===== */
+/* ---------- Export to Photopea (new document) ---------- */
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
@@ -309,7 +327,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }
 });
 
-/* ===== Copy original size ===== */
+/* ---------- Copy to Clipboard (original size) ---------- */
 copyBtn?.addEventListener("click", async ()=>{
   if (!canvasEl || !state.image) return;
   try{
@@ -334,7 +352,7 @@ copyBtn?.addEventListener("click", async ()=>{
   }
 });
 
-/* ===== Helpers ===== */
+/* ---------- Helpers ---------- */
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
