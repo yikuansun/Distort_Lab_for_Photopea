@@ -2,83 +2,63 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Distort Lab — Canvas 2D</title>
+  <title>Distort Lab for Photopea</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="icon" href="dl.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css" />
-  <style>
-    /* Minimal style for the Photopea export button (do not rely on styles.css) */
-    .btn-pp {
-      background:#00a592 !important;
-      color:#fff !important;
-      border:0;
-      border-radius:10px;
-      padding:8px 12px;
-      font-weight:600;
-      cursor:pointer;
-    }
-  </style>
+  <link rel="icon" href="./dl.svg" />
+  <link rel="stylesheet" href="./app/style.css" />
 </head>
 <body>
   <header>
     <div class="head-left">
       <h1>Distort Lab</h1>
-      <div class="sub"></div>
+      <div class="sub">Photopea integration</div>
     </div>
-    <div style="display:flex; gap:8px; align-items:center;">
-      <button id="exportToPPBtn" class="btn-pp" title="Send current output PNG to Photopea (new document)">Export PNG to Photopea (new document)</button>
-      <button id="commitBtn" class="ghost" title="Bake current output into source (Ctrl+B)">Commit Changes</button>
+    <div class="head-actions">
+      <button id="copyBtn" class="ghost">Copy to Clipboard (original size)</button>
+      <button id="exportToPPBtn" class="ghost" style="background:#00a592;color:#fff;border-color:#00a592;">Export PNG to Photopea (new document)</button>
     </div>
   </header>
 
   <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <section class="block">
-        <button id="loadBtn">Load Image…</button>
-
-        <div class="btn-grid-3">
-          <button id="zoomOutBtn">Zoom −</button>
-          <button id="zoom100Btn">100%</button>
-          <button id="zoomInBtn">Zoom +</button>
+    <aside class="sidebar">
+      <div class="block">
+        <label>Load image</label>
+        <button id="loadBtn">Open…</button>
+        <div class="btn-grid-3" style="margin-top:8px">
+          <button id="zoomOutBtn" class="secondary">Zoom −</button>
+          <button id="zoom100Btn" class="secondary">100%</button>
+          <button id="zoomInBtn" class="secondary">Zoom +</button>
         </div>
-
         <button id="fitBtn" class="secondary">Fit to view</button>
-        <button id="exportBtn">Export PNG</button>
+      </div>
 
-        <p class="hint">
-          Tip: drag &amp; drop an image onto the canvas, or paste from clipboard (Ctrl/Cmd+V).
-        </p>
-      </section>
-
-      <section class="block">
+      <div class="block">
         <label for="filterSelect">Filter</label>
         <select id="filterSelect"></select>
-      </section>
-
-      <section class="block" id="paramsPanel"></section>
-
-      <section class="block">
-        <button id="defaultsBtn" class="secondary">Default</button>
-
-        <label for="presetName" style="margin-top:8px;">Preset name</label>
-        <input id="presetName" class="input" type="text" placeholder="My preset" />
-        <div class="btn-grid-3" style="grid-template-columns:1fr 1fr; gap:8px; margin-top:8px;">
-          <button id="savePresetBtn">Save JSON</button>
-          <button id="loadPresetBtn">Load JSON</button>
+        <div id="paramsPanel" style="margin-top:10px;"></div>
+        <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <button id="commitBtn" class="secondary">Commit changes</button>
+          <button id="defaultsBtn" class="secondary">Default</button>
         </div>
-        <input id="loadPresetFile" type="file" accept="application/json" style="display:none" />
-      </section>
+      </div>
+
+      <div class="block">
+        <label for="presetName">Preset name</label>
+        <input id="presetName" class="input-full" placeholder="Preset name…" />
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
+          <button id="savePresetBtn" class="secondary">Save preset (JSON)</button>
+          <button id="loadPresetBtn" class="secondary">Load preset (JSON)</button>
+        </div>
+        <input id="loadPresetFile" type="file" accept="application/json" style="display:none;" />
+      </div>
     </aside>
 
-    <section class="stage" id="stage">
-      <div id="stagePlaceholder">
-        Drop an image here or use “Load Image…”
-      </div>
+    <main class="stage" id="stage">
+      <div id="stagePlaceholder">Drop an image here • Paste from clipboard • or click Open…</div>
       <canvas id="view" style="display:none;"></canvas>
-    </section>
+    </main>
   </div>
 
   <script type="module" src="./app/main.js"></script>
 </body>
 </html>
-
