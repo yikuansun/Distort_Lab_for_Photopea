@@ -18,7 +18,7 @@ const zoomOutBtn    = document.getElementById("zoomOutBtn");
 const zoomInBtn     = document.getElementById("zoomInBtn");
 const zoom100Btn    = document.getElementById("zoom100Btn");
 
-// NEW: header button to copy canvas at enforced 100%
+// NEW: header button to copy canvas at enforced 100% (keeps 100% afterwards)
 const copyClipboard100Btn = document.getElementById("copyClipboard100Btn");
 
 const commitBtn     = document.getElementById("commitBtn");
@@ -30,7 +30,7 @@ const savePresetBtn  = document.getElementById("savePresetBtn");
 const loadPresetBtn  = document.getElementById("loadPresetBtn");
 const loadPresetFile = document.getElementById("loadPresetFile");
 
-// Photopea export button (UNCHANGED)
+// Photopea export button (unchanged)
 const exportToPPBtn  = document.getElementById("exportToPPBtn");
 
 // ---------- Logging ----------
@@ -38,8 +38,8 @@ const LL = (...a)=>console.log("%c[DL-LAB]", "color:#58a6ff", ...a);
 const LP = (...a)=>console.log("%c[DL-PLUGIN]", "color:#9aa0a6", ...a);
 
 // ---------- Anti-race state ----------
-let lastSeqApplied = -1;
-let currentLoadId  = 0;
+let lastSeqApplied = -1; // last successfully applied frame seq
+let currentLoadId  = 0;  // monotonically increasing load generation
 
 // ---------- Boot ----------
 await initState();
@@ -60,7 +60,7 @@ state.currentFilter = registry[0];
 setFilterId(state.currentFilter.id);
 filterSelect.value = state.filterId;
 
-// Build UI for current filter
+// Build UI
 buildParamsPanel(
   paramsPanel,
   state.currentFilter,
@@ -110,7 +110,7 @@ filterSelect.addEventListener("change", () => {
   requestRender();
 });
 
-// View actions (UNCHANGED)
+// View actions (unchanged)
 fitBtn?.addEventListener("click", () => { fitToView(); requestRender(); });
 exportBtn?.addEventListener("click", () => exportPNG());
 zoom100Btn?.addEventListener("click", () => setScale(1));
@@ -157,13 +157,13 @@ copyClipboard100Btn?.addEventListener("click", async ()=>{
   }
 });
 
-// Commit (UNCHANGED)
+// Commit (unchanged)
 commitBtn?.addEventListener("click", () => {
   if (!canvasEl || canvasEl.style.display === "none") return;
   commitToSource(); fitToView(); requestRender();
 });
 
-// Defaults (UNCHANGED)
+// Defaults (unchanged)
 defaultsBtn?.addEventListener("click", () => {
   const f = state.currentFilter; if (!f) return;
   state.params[state.filterId] = defaultParamsFor(f);
@@ -174,7 +174,7 @@ defaultsBtn?.addEventListener("click", () => {
   requestRender();
 });
 
-// Presets (UNCHANGED)
+// Presets
 savePresetBtn?.addEventListener("click", () => {
   const payload = { type:"distort-lab-preset", version:1, filter:state.filterId, name:(presetNameEl?.value||"").trim(), params: state.params[state.filterId] };
   const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
@@ -202,7 +202,7 @@ loadPresetFile?.addEventListener("change", async (e)=>{
   finally{ e.target.value=""; }
 });
 
-// Common loader (UNCHANGED)
+// Common loader
 async function loadFileToState(file){
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -218,7 +218,7 @@ async function loadFileToState(file){
   img.src = url;
 }
 
-// Debounced render (UNCHANGED)
+// Debounced render
 let raf=0; function requestRender(){ if (raf) cancelAnimationFrame(raf); raf=requestAnimationFrame(()=>render()); }
 
 // Ensure next paint happens after enforcing 100%
@@ -250,9 +250,10 @@ async function writeImageToClipboard(blob){
   }
 }
 
-// ================== Photopea roundtrip integration (UNCHANGED) ==================
+// ================== Photopea roundtrip integration (unchanged) ==================
 const sessionId = new URLSearchParams(location.search).get("sessionId") || "";
 
+// Announce readiness after listeners are installed
 function announceReady(){
   try{
     if (window.opener && !window.opener.closed) {
@@ -263,6 +264,7 @@ function announceReady(){
 }
 window.addEventListener("DOMContentLoaded", announceReady);
 
+// Receive images from plugin
 window.addEventListener("message", async (ev)=>{
   const origin = ev.origin;
   if (origin !== "https://pt-home.github.io") return;
@@ -276,21 +278,31 @@ window.addEventListener("message", async (ev)=>{
 
   if (msg.type === "LAB_IMAGE" && msg.buffer instanceof ArrayBuffer) {
     const seq = typeof msg.seq === "number" ? msg.seq : -1;
+
+    // Ignore stale frames (seq must strictly increase)
     if (seq <= lastSeqApplied) {
       LL("← LAB_IMAGE (stale) seq="+seq+" ≤ last="+lastSeqApplied);
       return;
     }
+
+    // Start new load generation
     const loadId = ++currentLoadId;
     LL("← LAB_IMAGE seq="+seq+", bytes="+msg.buffer.byteLength+", loadId="+loadId);
+
     try{
       const blob = new Blob([msg.buffer], { type: msg.mime || "image/png" });
       const file = new File([blob], msg.name || "from-photopea.png", { type: blob.type });
+
+      // Await decoding & drawing; if a newer load started, abort applying
       await loadFileToState(file);
       if (loadId !== currentLoadId) {
         LL("skip apply (superseded) loadId="+loadId+" current="+currentLoadId);
         return;
       }
+
+      // Confirm only for the currently applied newest seq
       lastSeqApplied = seq;
+
       if (window.opener && !window.opener.closed) {
         window.opener.postMessage({ type:"LAB_IMAGE_APPLIED", sessionId, seq }, "https://pt-home.github.io");
         LL("→ LAB_IMAGE_APPLIED seq="+seq);
@@ -301,6 +313,7 @@ window.addEventListener("message", async (ev)=>{
   }
 });
 
+// Export current output PNG to Photopea (new document)
 exportToPPBtn?.addEventListener("click", async ()=>{
   try{
     const ab = await canvasToArrayBuffer(canvasEl);
@@ -313,6 +326,7 @@ exportToPPBtn?.addEventListener("click", async ()=>{
   }catch(e){ console.error(e); alert("Failed to export PNG to Photopea."); }
 });
 
+// Helper: canvas → ArrayBuffer (for Photopea export)
 function canvasToArrayBuffer(canvas){
   return new Promise((resolve,reject)=>{
     if (!canvas) return reject(new Error("No canvas"));
