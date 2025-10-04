@@ -33,7 +33,7 @@ export default {
     // Frame (pixels <-> complex)
     centerX: { label: "Center X (%)", type: "range",  min: 0,   max: 100, step: 1, default: 50 },
     centerY: { label: "Center Y (%)", type: "range",  min: 0,   max: 100, step: 1, default: 50 },
-    scale:   { label: "Scale (%)",    type: "range",  min: 10,  max: 400, step: 1, default: 120 },
+    scale:   { label: "Scale (%)",    type: "range",  min: 10,  max: 400, step: 1, default: 100 },
 
     // Visual rotation of the w-plane (degrees)
     rotate:  { label: "Rotate (°)",   type: "range",  min: -180, max: 180, step: 1, default: 0 },
@@ -127,3 +127,4 @@ export default {
     return { u, v };
   }
 };
+
