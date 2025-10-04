@@ -1,19 +1,23 @@
 /**
- * Angular modulation:
- *   forward:  w = r * exp(i * (theta + f(theta)))
- *   where f(theta) = A * sin(m * theta + phi)
+ * Angular Modulation (conformal angular warping)
  *
- * Inverse for rendering:
- *   Given w = R * exp(i * Theta), solve for theta from:
- *     Theta = theta + f(theta)
- *   i.e., g(theta) = theta + f(theta) - Theta = 0
+ * Forward model (conceptual):
+ *   w = r * exp(i * (theta + f(theta))),   f(theta) = A * sin(m * theta + phi)
  *
- * We solve g(theta)=0 with a small number of Newton iterations:
- *   g'(theta) = 1 + f'(theta) = 1 + A * m * cos(m*theta + phi)
- * and fall back to simple fixed-point if the denominator becomes tiny.
+ * Rendering needs inverse mapping: given output pixel (x,y) ~ w,
+ * find source pixel (u,v) ~ z such that:
+ *   Theta = theta + f(theta)            where Theta = arg(w)
+ * We solve g(theta) = theta + A*sin(m*theta + phi) - Theta = 0
+ * with a few Newton steps (fallback to fixed-point when derivative ~ 0).
  *
- * After theta is found, source z is:
- *   z = r * exp(i * theta)  with r = R  (radius preserved)
+ * NOTE about Scale:
+ * - We use TWO scales:
+ *     S0 : fixed base pixels-per-unit (depends on image size)
+ *     S  : user-controlled scale (UI slider) applied only on the INPUT
+ * - Pixels -> complex uses S
+ * - Complex -> pixels uses S0 (not S), so the effect does not cancel out.
+ *   Intuitively: larger Scale (%) → you see a "zoomed-out" complex plane,
+ *   so modulation per pixel is denser/weaker; smaller Scale (%) → stronger effect.
  */
 
 export default {
@@ -21,17 +25,17 @@ export default {
   name: "Angular Modulation",
 
   params: {
-    // f(theta) = A * sin(m*theta + phi). UI in degrees for A and phi.
-    amplitudeDeg: { label: "Amplitude (°)", type: "range", min: -180, max: 180, step: 1, default: -6 },
-    harmonic:     { label: "Harmonic m",    type: "number", min: 0,   max: 50,  step: 1, default: 8 },
-    phaseDeg:     { label: "Phase (°)",     type: "range",  min: 0,   max: 360, step: 1, default: 0 },
+    // f(theta) = A * sin(m*theta + phi) ; A, phi in degrees for UI
+    amplitudeDeg: { label: "Amplitude (°)", type: "range",  min: -180, max: 180, step: 1, default: -6 },
+    harmonic:     { label: "Harmonic m",    type: "number", min: 0,    max: 50,  step: 1, default: 8 },
+    phaseDeg:     { label: "Phase (°)",     type: "range",  min: 0,    max: 360, step: 1, default: 0 },
 
     // Frame (pixels <-> complex)
-    centerX: { label: "Center X (%)", type: "range",  min: 0, max: 100, step: 1, default: 50 },
-    centerY: { label: "Center Y (%)", type: "range",  min: 0, max: 100, step: 1, default: 50 },
-    scale:   { label: "Scale (%)",    type: "range",  min: 10, max: 400, step: 1, default: 120 },
+    centerX: { label: "Center X (%)", type: "range",  min: 0,   max: 100, step: 1, default: 50 },
+    centerY: { label: "Center Y (%)", type: "range",  min: 0,   max: 100, step: 1, default: 50 },
+    scale:   { label: "Scale (%)",    type: "range",  min: 10,  max: 400, step: 1, default: 120 },
 
-    // Visual rotation of the w-plane
+    // Visual rotation of the w-plane (degrees)
     rotate:  { label: "Rotate (°)",   type: "range",  min: -180, max: 180, step: 1, default: 0 },
 
     // Numerical solver tuning
@@ -40,54 +44,63 @@ export default {
     // Optional soft clamp (in source pixels from center) to cut extreme samples
     clampRadius: { label: "Clamp Radius (%)", type: "range", min: 10, max: 300, step: 1, default: 200 },
 
+    // Edge behavior when sampling goes out of bounds (handled in engine)
     edgeMode: { label: "Edges", type: "select", options: ["clamp","wrap","mirror","transparent"], default: "transparent" }
   },
 
+  /**
+   * Inverse map from output pixel (x,y) to source UV.
+   * W,H are source dimensions. p contains UI parameters and derived center/radius.
+   */
   map(x, y, W, H, p) {
-    const cx = p.cx, cy = p.cy;
+    const cx = p.cx;
+    const cy = p.cy;
 
-    // Pixels -> complex w
-    const S = Math.max(1e-6, (p.scale / 100) * (Math.min(W, H) * 0.5)); // px per unit
+    // Base pixel-per-unit (fixed) and controllable input scale:
+    const S0 = Math.max(1e-6, Math.min(W, H) * 0.5);                 // fixed base scale (px per unit)
+    const S  = Math.max(1e-6, (Number(p.scale) / 100) * S0);         // input scale (UI)
+
+    // Pixels -> complex w (apply input scale S)
     let wRe = (x - cx) / S;
     let wIm = (y - cy) / S;
 
-    // Pre-rotate w-space (negative so UI rotate is intuitive)
-    const rot = (p.rotate || 0) * Math.PI / 180;
+    // Pre-rotate w-space (negative angle so UI is intuitive)
+    const rot = (Number(p.rotate) || 0) * Math.PI / 180;
     if (rot !== 0) {
       const c = Math.cos(-rot), s = Math.sin(-rot);
-      const r = wRe * c - wIm * s;
-      const i = wRe * s + wIm * c;
-      wRe = r; wIm = i;
+      const rw = wRe * c - wIm * s;
+      const iw = wRe * s + wIm * c;
+      wRe = rw; wIm = iw;
     }
 
     // Polar of w
     const R = Math.hypot(wRe, wIm);
     if (R < 1e-6) {
-      // Near singularity; map outside and make transparent
+      // At singularity; mark transparent to avoid ringing
       return { u: W * 10, v: H * 10, aOverride: 0 };
     }
     const Theta = Math.atan2(wIm, wRe);
 
-    // Prepare f(theta) = A * sin(m*theta + phi) with A,phi in radians
+    // f(theta) = A * sin(m*theta + phi), A,phi in radians
     const A   = (Number(p.amplitudeDeg) || 0) * Math.PI / 180;
     const m   = Math.max(0, Math.floor(Number(p.harmonic) || 0));
     const phi = (Number(p.phaseDeg) || 0) * Math.PI / 180;
 
     // Solve g(theta) = theta + A*sin(m*theta + phi) - Theta = 0
-    // Start from theta0 = Theta
+    // Initial guess: theta0 = Theta
     let theta = Theta;
-    const iters = Math.max(1, Math.min(20, Math.floor(Number(p.iterations) || 6)));
+    const maxIters = Math.max(1, Math.min(20, Math.floor(Number(p.iterations) || 6)));
 
-    for (let k = 0; k < iters; k++) {
-      const t = m * theta + phi;
-      const s = Math.sin(t);
-      const c = Math.cos(t);
+    for (let k = 0; k < maxIters; k++) {
+      const t  = m * theta + phi;
+      const s  = Math.sin(t);
+      const c  = Math.cos(t);
       const g  = theta + A * s - Theta;
       const gp = 1 + A * m * c;
 
-      // If derivative is too small, fall back to fixed-point
       if (Math.abs(gp) < 1e-4) {
-        theta = Theta - A * s;  // one fixed-point step
+        // Derivative too small → one fixed-point step (robust fallback)
+        theta = Theta - A * s;
       } else {
         theta = theta - g / gp; // Newton step
       }
@@ -95,16 +108,16 @@ export default {
       if (!isFinite(theta)) { theta = Theta; break; }
     }
 
-    // Source z has radius R and angle 'theta'
+    // Source z has radius R and found angle theta
     const zRe = R * Math.cos(theta);
     const zIm = R * Math.sin(theta);
 
-    // Complex -> source pixels
-    let u = cx + zRe * S;
-    let v = cy + zIm * S;
+    // Complex -> source pixels: use FIXED S0 (do not cancel S)
+    let u = cx + zRe * S0;
+    let v = cy + zIm * S0;
 
-    // Soft clamp by radius in source space
-    const clampPx = (p.clampRadius / 100) * (Math.min(W, H) * 0.5);
+    // Optional soft clamp by radius (in pixels, relative to S0)
+    const clampPx = (Number(p.clampRadius) / 100) * (Math.min(W, H) * 0.5);
     const du = u - cx, dv = v - cy;
     if (Math.hypot(du, dv) > clampPx) {
       return { u: W * 10, v: H * 10, aOverride: 0 };
