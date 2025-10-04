@@ -11,7 +11,7 @@
     *{ box-sizing:border-box; }
     html,body{ height:100%; }
     body{
-      margin:0; background:var(--panel); color:var(--text);
+      margin:0; background:var(--panel); color:var(--text); text-align: center;
       font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
     }
     .wrap{ padding:12px; width:100%; max-width:520px; }
@@ -27,7 +27,7 @@
 <body>
   <div class="wrap">
     <h1>Distort Lab for Photopea</h1>
-    <p>Send the active layer to Distort Lab, tweak distortions, then export back as a new Photopea document.</p>
+    <p>Send the active layer to Distort Lab, tweak distortions, then export back as a new Photopea document (or use a buffer).</p>
     <button id="sendBtn" class="btn">Send to Lab</button>
     <div class="note" id="status"></div>
   </div>
