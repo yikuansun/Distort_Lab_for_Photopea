@@ -7,7 +7,7 @@
   <link rel="icon" href="dl.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css" />
   <style>
-    /* Minimal style for the Photopea export button (do not rely on styles.css) */
+    
     .btn-pp {
       background:#00a592 !important;
       color:#fff !important;
@@ -22,12 +22,11 @@
 <body>
   <header>
     <div class="head-left">
-      <h1>Distort Lab</h1>
+      <h1><img src="dl_invert.svg" width="16px">Distort Lab</h1>
       <div class="sub"></div>
     </div>
     <div style="display:flex; gap:8px; align-items:center;">
       <button id="exportToPPBtn" class="btn-pp" title="Send current output PNG to Photopea (new document)">Export PNG to Photopea (new document)</button>
-      <!-- NEW: just added button -->
       <button id="copyClipboard100Btn" class="btn-pp" title="Copy current canvas as PNG at 100% zoom">Copy to Clipboard (100%)</button>
       <button id="commitBtn"  class="btn-pp" title="Bake current output into source (Ctrl+B)">Bake Changes</button>
     </div>
@@ -70,6 +69,7 @@
         </div>
         <input id="loadPresetFile" type="file" accept="application/json" style="display:none" />
       </section>
+      <small>(c) Oleg Pustovoit, 2025.</small>
     </aside>
 
     <section class="stage" id="stage">
@@ -83,6 +83,7 @@
   <script type="module" src="./app/main.js"></script>
 </body>
 </html>
+
 
 
 
