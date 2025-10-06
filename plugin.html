@@ -76,7 +76,8 @@
       ensureSession();
       const url = LAB_URL + "?sessionId=" + encodeURIComponent(sessionId);
       if (!labWin || labWin.closed) {
-        labWin = window.open(url, "_blank");
+        let width = 900, height = 600;
+        labWin = window.open(url, "_blank", `width=${width},height=${height},left=${(screen.width-width)/2},top=${(screen.height-height)/2}`);
         labIsReady = false;
         setStatus("Opening Distort Lab…");
         L("Opened Lab tab:", url);
